@@ -1,35 +1,51 @@
 /*
  * Booze Barometer - Arduino Nano
  *
- * D2  Start switch   (NO to GND, INPUT_PULLUP)
- * D3  Wire sense     (rod to pin, ring to GND)
- * D4  End / win      (NO to GND, INPUT_PULLUP)
- * D5  Buzzer         (piezo + to pin, - to GND)
- * D6  Game lights    (220R + LED to GND)
- * D8  Coin switch    (NO to GND, INPUT_PULLUP)
- * D9  Win LED        (220R + LED to GND)
- * D13 Status (onboard)
+ * Board layout (see schematic):
+ *   A0  Coin        (switch to GND, 100nF on board)
+ *   A1  Start
+ *   A2  Fail        (wire / ring sense)
+ *   A3  Win         (end-of-path)
+ *   D2  FRONT       WS2812 LED strip data
+ *   D3  BACK        WS2812 LED strip data
+ *   D4  Attract LED
+ *   D5  Game LED
+ *   D6  Relay       (use a relay MODULE, not a bare coil)
+ *   D7  Spare
+ *
+ * Library: Adafruit NeoPixel (Sketch -> Include Library -> Manage Libraries)
  */
 
-const byte PIN_START = 2;
-const byte PIN_WIRE  = 3;
-const byte PIN_END   = 4;
-const byte PIN_BUZZ  = 5;
-const byte PIN_LIGHT = 6;
-const byte PIN_COIN  = 8;
-const byte PIN_WIN   = 9;
-const byte PIN_STAT  = 13;
+#include <Adafruit_NeoPixel.h>
 
-const unsigned long DEBOUNCE_MS = 40;
-const unsigned long FAIL_BUZZ_MS = 800;
-const unsigned long WIN_FLASH_MS = 2000;
+// ---- pin map ----
+const byte PIN_COIN    = A0;
+const byte PIN_START   = A1;
+const byte PIN_FAIL    = A2;
+const byte PIN_WIN     = A3;
+
+const byte PIN_FRONT   = 2;   // WS2812
+const byte PIN_BACK    = 3;   // WS2812
+const byte PIN_ATTRACT = 4;
+const byte PIN_GAME    = 5;
+const byte PIN_RELAY   = 6;
+const byte PIN_SPARE   = 7;
+
+// ---- strip size (edit to match your strips) ----
+const int NUM_FRONT = 30;
+const int NUM_BACK  = 30;
+
+Adafruit_NeoPixel front(NUM_FRONT, PIN_FRONT, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel back (NUM_BACK,  PIN_BACK,  NEO_GRB + NEO_KHZ800);
+
+const unsigned long DEBOUNCE_MS   = 40;    // software; board also has 100nF
+const unsigned long FAIL_HOLD_MS  = 1200;
+const unsigned long WIN_HOLD_MS   = 2500;
+const unsigned long RELAY_PULSE_MS = 250;
 
 enum State : byte { IDLE, ARMED, PLAYING, FAIL, WIN };
 State state = IDLE;
 
-bool credit = false;
-
-// ---- edge helpers (active LOW, pulled up) ----
 struct Button {
   byte pin;
   bool stable;
@@ -37,10 +53,14 @@ struct Button {
   unsigned long lastChange;
 };
 
-Button btnStart = { PIN_START, HIGH, HIGH, 0 };
 Button btnCoin  = { PIN_COIN,  HIGH, HIGH, 0 };
-Button btnEnd   = { PIN_END,   HIGH, HIGH, 0 };
-Button btnWire  = { PIN_WIRE,  HIGH, HIGH, 0 };
+Button btnStart = { PIN_START, HIGH, HIGH, 0 };
+Button btnFail  = { PIN_FAIL,  HIGH, HIGH, 0 };
+Button btnWin   = { PIN_WIN,   HIGH, HIGH, 0 };
+
+unsigned long phaseStart = 0;
+unsigned long animTick   = 0;
+uint16_t animStep        = 0;
 
 bool updateButton(Button &b) {
   bool raw = digitalRead(b.pin);
@@ -51,99 +71,195 @@ bool updateButton(Button &b) {
   }
   if ((now - b.lastChange) >= DEBOUNCE_MS && raw != b.stable) {
     b.stable = raw;
-    return true;  // state changed
+    return true;
   }
   return false;
 }
 
-bool pressed(const Button &b)  { return b.stable == LOW; }
+bool pressed(const Button &b) { return b.stable == LOW; }
+
 bool justPressed(Button &b) {
   return updateButton(b) && pressed(b);
 }
 
-void lights(bool on)  { digitalWrite(PIN_LIGHT, on ? HIGH : LOW); }
-void winLed(bool on)  { digitalWrite(PIN_WIN,   on ? HIGH : LOW); }
-void status(bool on)  { digitalWrite(PIN_STAT,  on ? HIGH : LOW); }
-
-void buzzFail() {
-  tone(PIN_BUZZ, 440, FAIL_BUZZ_MS);
+void setBoardLeds(bool attract, bool game) {
+  digitalWrite(PIN_ATTRACT, attract ? HIGH : LOW);
+  digitalWrite(PIN_GAME,    game    ? HIGH : LOW);
 }
 
-void buzzWin() {
-  tone(PIN_BUZZ, 880, 150);
-  delay(180);
-  tone(PIN_BUZZ, 1175, 150);
-  delay(180);
-  tone(PIN_BUZZ, 1568, 300);
+void relay(bool on) {
+  digitalWrite(PIN_RELAY, on ? HIGH : LOW);
+}
+
+void fillStrip(Adafruit_NeoPixel &s, uint8_t r, uint8_t g, uint8_t b) {
+  for (int i = 0; i < s.numPixels(); i++) {
+    s.setPixelColor(i, s.Color(r, g, b));
+  }
+  s.show();
+}
+
+void bothSolid(uint8_t r, uint8_t g, uint8_t b) {
+  fillStrip(front, r, g, b);
+  fillStrip(back,  r, g, b);
+}
+
+// soft chase for attract / idle
+void animAttract() {
+  unsigned long now = millis();
+  if (now - animTick < 40) return;
+  animTick = now;
+  animStep++;
+
+  for (int i = 0; i < NUM_FRONT; i++) {
+    uint8_t v = ((i + animStep) % 12 == 0) ? 80 : 8;
+    front.setPixelColor(i, front.Color(v, v / 3, 0));  // warm amber
+  }
+  for (int i = 0; i < NUM_BACK; i++) {
+    uint8_t v = ((i + animStep + 6) % 12 == 0) ? 80 : 8;
+    back.setPixelColor(i, back.Color(v, v / 3, 0));
+  }
+  front.show();
+  back.show();
+
+  // blink attract lamp slowly
+  setBoardLeds((now / 500) % 2 == 0, false);
+}
+
+void animArmed() {
+  unsigned long now = millis();
+  if (now - animTick < 80) return;
+  animTick = now;
+  animStep++;
+
+  bool on = (animStep % 2) == 0;
+  bothSolid(on ? 0 : 0, on ? 40 : 0, on ? 80 : 0);  // blue pulse
+  setBoardLeds(on, false);
+}
+
+void animPlaying() {
+  unsigned long now = millis();
+  if (now - animTick < 30) return;
+  animTick = now;
+  animStep++;
+
+  for (int i = 0; i < NUM_FRONT; i++) {
+    uint8_t v = (i == (int)(animStep % NUM_FRONT)) ? 120 : 15;
+    front.setPixelColor(i, front.Color(0, v, v / 4));
+  }
+  for (int i = 0; i < NUM_BACK; i++) {
+    int idx = NUM_BACK - 1 - (animStep % NUM_BACK);
+    uint8_t v = (i == idx) ? 120 : 15;
+    back.setPixelColor(i, back.Color(0, v, v / 4));
+  }
+  front.show();
+  back.show();
+  setBoardLeds(false, true);
+}
+
+void animFail() {
+  unsigned long now = millis();
+  bool on = ((now - phaseStart) / 100) % 2 == 0;
+  bothSolid(on ? 150 : 0, 0, 0);
+  setBoardLeds(false, on);
+}
+
+void animWin() {
+  unsigned long now = millis();
+  if (now - animTick < 50) return;
+  animTick = now;
+  animStep++;
+
+  for (int i = 0; i < NUM_FRONT; i++) {
+    uint8_t hue = (animStep * 8 + i * 8) & 0xFF;
+    front.setPixelColor(i, front.ColorHSV((uint16_t)hue << 8, 255, 120));
+  }
+  for (int i = 0; i < NUM_BACK; i++) {
+    uint8_t hue = (animStep * 8 + i * 8 + 40) & 0xFF;
+    back.setPixelColor(i, back.ColorHSV((uint16_t)hue << 8, 255, 120));
+  }
+  front.show();
+  back.show();
+  setBoardLeds(true, true);
 }
 
 void enterIdle() {
   state = IDLE;
-  credit = false;
-  lights(false);
-  winLed(false);
-  status(false);
-  noTone(PIN_BUZZ);
+  relay(false);
+  bothSolid(0, 0, 0);
+  setBoardLeds(false, false);
+  animStep = 0;
+  animTick = 0;
 }
 
 void enterArmed() {
   state = ARMED;
-  credit = true;
-  lights(false);
-  winLed(false);
-  status(true);  // ready
+  relay(false);
+  animStep = 0;
+  animTick = 0;
 }
 
 void enterPlaying() {
   state = PLAYING;
-  lights(true);
-  winLed(false);
-  status(true);
-  // ignore wire contact briefly so seating the ring doesn't false-fail
-  btnWire.stable = HIGH;
-  btnWire.lastRaw = digitalRead(PIN_WIRE);
-  btnWire.lastChange = millis();
+  relay(true);   // hold / lock while game runs (module active-HIGH)
+  // clear fail edge so seating the ring doesn't instant-fail
+  btnFail.stable = HIGH;
+  btnFail.lastRaw = digitalRead(PIN_FAIL);
+  btnFail.lastChange = millis();
+  animStep = 0;
+  animTick = 0;
+  setBoardLeds(false, true);
 }
 
 void enterFail() {
   state = FAIL;
-  lights(false);
-  winLed(false);
-  status(false);
-  credit = false;
-  buzzFail();
+  phaseStart = millis();
+  relay(true);   // pulse start; turned off after RELAY_PULSE_MS
+  animStep = 0;
 }
 
 void enterWin() {
   state = WIN;
-  lights(false);
-  credit = false;
-  buzzWin();
+  phaseStart = millis();
+  relay(false);
+  animStep = 0;
+  animTick = 0;
 }
 
 void setup() {
-  pinMode(PIN_START, INPUT_PULLUP);
-  pinMode(PIN_WIRE,  INPUT_PULLUP);
-  pinMode(PIN_END,   INPUT_PULLUP);
   pinMode(PIN_COIN,  INPUT_PULLUP);
+  pinMode(PIN_START, INPUT_PULLUP);
+  pinMode(PIN_FAIL,  INPUT_PULLUP);
+  pinMode(PIN_WIN,   INPUT_PULLUP);
 
-  pinMode(PIN_BUZZ,  OUTPUT);
-  pinMode(PIN_LIGHT, OUTPUT);
-  pinMode(PIN_WIN,   OUTPUT);
-  pinMode(PIN_STAT,  OUTPUT);
+  pinMode(PIN_ATTRACT, OUTPUT);
+  pinMode(PIN_GAME,    OUTPUT);
+  pinMode(PIN_RELAY,   OUTPUT);
+  pinMode(PIN_SPARE,   OUTPUT);
+
+  relay(false);
+  digitalWrite(PIN_SPARE, LOW);
+  setBoardLeds(false, false);
+
+  front.begin();
+  back.begin();
+  front.setBrightness(80);
+  back.setBrightness(80);
+  front.clear();
+  back.clear();
+  front.show();
+  back.show();
 
   enterIdle();
 }
 
 void loop() {
-  static unsigned long phaseStart = 0;
-
   switch (state) {
     case IDLE:
+      animAttract();
       if (justPressed(btnCoin)) {
         enterArmed();
       }
-      // free-play / test: start with no coin
+      // free-play / test
       if (justPressed(btnStart)) {
         enterArmed();
         enterPlaying();
@@ -151,42 +267,39 @@ void loop() {
       break;
 
     case ARMED:
-      updateButton(btnCoin);  // keep debounce warm
+      animArmed();
+      updateButton(btnCoin);
       if (justPressed(btnStart)) {
         enterPlaying();
       }
-      // blink status while armed
-      status((millis() / 400) % 2 == 0);
       break;
 
     case PLAYING:
+      animPlaying();
       updateButton(btnStart);
-      updateButton(btnWire);
-      if (pressed(btnWire)) {
+      updateButton(btnFail);
+      if (pressed(btnFail)) {
         enterFail();
-        phaseStart = millis();
-      } else if (justPressed(btnEnd)) {
+      } else if (justPressed(btnWin)) {
         enterWin();
-        phaseStart = millis();
       }
       break;
 
     case FAIL:
-      if (millis() - phaseStart >= FAIL_BUZZ_MS) {
+      animFail();
+      if (millis() - phaseStart >= RELAY_PULSE_MS) {
+        relay(false);
+      }
+      if (millis() - phaseStart >= FAIL_HOLD_MS) {
         enterIdle();
       }
       break;
 
-    case WIN: {
-      // flash win LED for a bit, then idle
-      bool on = ((millis() - phaseStart) / 150) % 2 == 0;
-      winLed(on);
-      lights(on);
-      status(on);
-      if (millis() - phaseStart >= WIN_FLASH_MS) {
+    case WIN:
+      animWin();
+      if (millis() - phaseStart >= WIN_HOLD_MS) {
         enterIdle();
       }
       break;
-    }
   }
 }

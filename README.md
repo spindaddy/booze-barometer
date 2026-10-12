@@ -12,32 +12,38 @@ Insert a coin (or hit Start for free play), guide the ring along the bent rod wi
 
 | Pin | Role |
 |-----|------|
-| D2 | Start switch (NO to GND) |
-| D3 | Wire sense (rod to pin, ring to GND) |
-| D4 | End / win switch (NO to GND) |
-| D5 | Piezo buzzer |
-| D6 | Game lights (220Ω + LED to GND) |
-| D8 | Coin switch (NO to GND) |
-| D9 | Win LED (220Ω + LED to GND) |
-| D13 | Onboard status LED |
+| A0 | Coin switch (to GND) |
+| A1 | Start switch (to GND) |
+| A2 | Fail / wire sense (to GND) |
+| A3 | Win / end switch (to GND) |
+| D2 | FRONT WS2812 LED strip (data) |
+| D3 | BACK WS2812 LED strip (data) |
+| D4 | Attract LED |
+| D5 | Game LED |
+| D6 | Relay module (active HIGH) |
+| D7 | Spare |
 
-All inputs use `INPUT_PULLUP` (active LOW).
+Inputs use `INPUT_PULLUP` (active LOW). Board has 100 nF on each input.
+
+Set `NUM_FRONT` / `NUM_BACK` in the sketch to match your strip lengths.
 
 ## How to play (firmware)
 
-1. **IDLE** — drop a coin → **ARMED** (status blinks), or press Start for free play
-2. **ARMED** — press Start → **PLAYING** (lights on)
-3. **PLAYING** — wire touch → fail buzz; end switch → win tones + flash
+1. **IDLE** — amber chase on FRONT/BACK, Attract blinks; coin → **ARMED**, or Start for free play
+2. **ARMED** — blue pulse; Start → **PLAYING**
+3. **PLAYING** — Game LED on, green chase on strips, relay held; Fail → red flash; Win → rainbow
 4. Back to **IDLE**
 
 ## Upload
 
-1. Open `booze_barometer/booze_barometer.ino` in the Arduino IDE
-2. Board: **Arduino Nano**
-3. Upload
+1. Install **Adafruit NeoPixel** from Library Manager
+2. Open `booze_barometer/booze_barometer.ino` in the Arduino IDE
+3. Board: **Arduino Nano**
+4. Upload
 
 ## Notes
 
-- Keep the wire path at 5V logic only — do not put battery voltage on the rod/ring
-- Stay under ~20 mA per LED pin
-- Small piezo on D5 is fine direct; a loud 12V bell would need a driver
+- Wire path / switches are 5V logic only
+- Drive the relay header with a **relay module**, not a bare coil
+- WS2812 5V + GND must be solid; data from D2/D3
+- Stay under ~20 mA on the discrete Attract/Game LEDs (1 kΩ on the board)
