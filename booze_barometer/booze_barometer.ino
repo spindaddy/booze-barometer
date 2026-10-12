@@ -1,46 +1,55 @@
 /*
  * Booze Barometer - Arduino Nano
  *
- * Board layout (see schematic):
- *   A0  Coin        (switch to GND, 100nF on board)
- *   A1  Start
- *   A2  Fail        (wire / ring sense)
- *   A3  Win         (end-of-path)
- *   D2  FRONT       WS2812 LED strip data
- *   D3  BACK        WS2812 LED strip data
- *   D4  Attract LED
- *   D5  Game LED
- *   D6  Relay       (use a relay MODULE, not a bare coil)
- *   D7  Spare
+ * Matches board schematic (XH connectors + J1):
  *
- * Library: Adafruit NeoPixel (Sketch -> Include Library -> Manage Libraries)
+ *   Inputs (J1, NO switch to GND, 100nF C1-C4 on board):
+ *     J1-2 Start -> A1
+ *     J1-3 Fail  -> A2   (wire / ring sense)
+ *     J1-4 Win   -> A3   (end of path)
+ *     J1-5 Coin  -> A0
+ *     J1-1 GND
+ *
+ *   Outputs (XH 1=5V, 2=signal, 3=GND):
+ *     FRONT  D2  WS2812 data
+ *     BACK   D3  WS2812 data
+ *     RELAY  D6  relay MODULE (not bare coil)
+ *     SPARE  D7
+ *
+ *   Board LEDs:
+ *     POWER    always on (5V)
+ *     ATTRACT  D4
+ *     GAME     D5
+ *
+ * Library: Adafruit NeoPixel
+ *   Sketch -> Include Library -> Manage Libraries -> "Adafruit NeoPixel"
  */
 
 #include <Adafruit_NeoPixel.h>
 
-// ---- pin map ----
+// ---- pin map (schematic) ----
 const byte PIN_COIN    = A0;
 const byte PIN_START   = A1;
 const byte PIN_FAIL    = A2;
 const byte PIN_WIN     = A3;
 
-const byte PIN_FRONT   = 2;   // WS2812
-const byte PIN_BACK    = 3;   // WS2812
+const byte PIN_FRONT   = 2;   // WS2812 FRONT
+const byte PIN_BACK    = 3;   // WS2812 BACK
 const byte PIN_ATTRACT = 4;
 const byte PIN_GAME    = 5;
 const byte PIN_RELAY   = 6;
 const byte PIN_SPARE   = 7;
 
-// ---- strip size (edit to match your strips) ----
+// ---- strip length (edit to match your WS2812 strips) ----
 const int NUM_FRONT = 30;
 const int NUM_BACK  = 30;
 
 Adafruit_NeoPixel front(NUM_FRONT, PIN_FRONT, NEO_GRB + NEO_KHZ800);
 Adafruit_NeoPixel back (NUM_BACK,  PIN_BACK,  NEO_GRB + NEO_KHZ800);
 
-const unsigned long DEBOUNCE_MS   = 40;    // software; board also has 100nF
-const unsigned long FAIL_HOLD_MS  = 1200;
-const unsigned long WIN_HOLD_MS   = 2500;
+const unsigned long DEBOUNCE_MS    = 40;     // plus 100nF on board
+const unsigned long FAIL_HOLD_MS   = 1200;
+const unsigned long WIN_HOLD_MS    = 2500;
 const unsigned long RELAY_PULSE_MS = 250;
 
 enum State : byte { IDLE, ARMED, PLAYING, FAIL, WIN };
@@ -103,7 +112,6 @@ void bothSolid(uint8_t r, uint8_t g, uint8_t b) {
   fillStrip(back,  r, g, b);
 }
 
-// soft chase for attract / idle
 void animAttract() {
   unsigned long now = millis();
   if (now - animTick < 40) return;
@@ -112,7 +120,7 @@ void animAttract() {
 
   for (int i = 0; i < NUM_FRONT; i++) {
     uint8_t v = ((i + animStep) % 12 == 0) ? 80 : 8;
-    front.setPixelColor(i, front.Color(v, v / 3, 0));  // warm amber
+    front.setPixelColor(i, front.Color(v, v / 3, 0));
   }
   for (int i = 0; i < NUM_BACK; i++) {
     uint8_t v = ((i + animStep + 6) % 12 == 0) ? 80 : 8;
@@ -120,8 +128,6 @@ void animAttract() {
   }
   front.show();
   back.show();
-
-  // blink attract lamp slowly
   setBoardLeds((now / 500) % 2 == 0, false);
 }
 
@@ -132,7 +138,7 @@ void animArmed() {
   animStep++;
 
   bool on = (animStep % 2) == 0;
-  bothSolid(on ? 0 : 0, on ? 40 : 0, on ? 80 : 0);  // blue pulse
+  bothSolid(0, on ? 40 : 0, on ? 80 : 0);  // blue pulse
   setBoardLeds(on, false);
 }
 
@@ -142,17 +148,21 @@ void animPlaying() {
   animTick = now;
   animStep++;
 
-  for (int i = 0; i < NUM_FRONT; i++) {
-    uint8_t v = (i == (int)(animStep % NUM_FRONT)) ? 120 : 15;
-    front.setPixelColor(i, front.Color(0, v, v / 4));
+  if (NUM_FRONT > 0) {
+    for (int i = 0; i < NUM_FRONT; i++) {
+      uint8_t v = (i == (int)(animStep % NUM_FRONT)) ? 120 : 15;
+      front.setPixelColor(i, front.Color(0, v, v / 4));
+    }
+    front.show();
   }
-  for (int i = 0; i < NUM_BACK; i++) {
-    int idx = NUM_BACK - 1 - (animStep % NUM_BACK);
-    uint8_t v = (i == idx) ? 120 : 15;
-    back.setPixelColor(i, back.Color(0, v, v / 4));
+  if (NUM_BACK > 0) {
+    for (int i = 0; i < NUM_BACK; i++) {
+      int idx = NUM_BACK - 1 - (int)(animStep % NUM_BACK);
+      uint8_t v = (i == idx) ? 120 : 15;
+      back.setPixelColor(i, back.Color(0, v, v / 4));
+    }
+    back.show();
   }
-  front.show();
-  back.show();
   setBoardLeds(false, true);
 }
 
@@ -200,8 +210,8 @@ void enterArmed() {
 
 void enterPlaying() {
   state = PLAYING;
-  relay(true);   // hold / lock while game runs (module active-HIGH)
-  // clear fail edge so seating the ring doesn't instant-fail
+  relay(true);  // active while game runs (relay module, active HIGH)
+  // ignore fail briefly so seating the ring does not instant-fail
   btnFail.stable = HIGH;
   btnFail.lastRaw = digitalRead(PIN_FAIL);
   btnFail.lastChange = millis();
@@ -213,7 +223,7 @@ void enterPlaying() {
 void enterFail() {
   state = FAIL;
   phaseStart = millis();
-  relay(true);   // pulse start; turned off after RELAY_PULSE_MS
+  relay(true);  // short pulse; cleared in FAIL state
   animStep = 0;
 }
 
@@ -258,9 +268,8 @@ void loop() {
       animAttract();
       if (justPressed(btnCoin)) {
         enterArmed();
-      }
-      // free-play / test
-      if (justPressed(btnStart)) {
+      } else if (justPressed(btnStart)) {
+        // free-play / bench test (no coin)
         enterArmed();
         enterPlaying();
       }
