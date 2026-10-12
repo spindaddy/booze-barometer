@@ -6,7 +6,7 @@ Insert a coin (or hit Start for free play), guide the ring along the bent rod wi
 
 ## Schematic
 
-![Booze Barometer Arduino Nano schematic](schematic.svg)
+![Booze Barometer board schematic](schematic.svg)
 
 ## Pinout
 
