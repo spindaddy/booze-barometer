@@ -6,9 +6,8 @@ Insert a coin (or press Start for free play), guide the ring along the bent rod 
 
 ## Schematic
 
-![Booze Barometer board schematic](board-schematic.svg)
+![Booze Barometer board schematic](image.png)
 
-If the image above does not load, see [board-schematic.svg](board-schematic.svg).
 
 ## Pinout
 
