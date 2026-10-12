@@ -6,7 +6,7 @@ Insert a coin (or hit Start for free play), guide the ring along the bent rod wi
 
 ## Schematic
 
-![Booze Barometer board schematic](schematic.svg)
+![Booze Barometer board schematic](board-schematic.svg)
 
 ## Pinout
 
@@ -29,9 +29,9 @@ Set `NUM_FRONT` / `NUM_BACK` in the sketch to match your strip lengths.
 
 ## How to play (firmware)
 
-1. **IDLE** — amber chase on FRONT/BACK, Attract blinks; coin → **ARMED**, or Start for free play
-2. **ARMED** — blue pulse; Start → **PLAYING**
-3. **PLAYING** — Game LED on, green chase on strips, relay held; Fail → red flash; Win → rainbow
+1. **IDLE** - amber chase on FRONT/BACK, Attract blinks; coin -> **ARMED**, or Start for free play
+2. **ARMED** - blue pulse; Start -> **PLAYING**
+3. **PLAYING** - Game LED on, green chase on strips, relay held; Fail -> red flash; Win -> rainbow
 4. Back to **IDLE**
 
 ## Upload
@@ -46,4 +46,4 @@ Set `NUM_FRONT` / `NUM_BACK` in the sketch to match your strip lengths.
 - Wire path / switches are 5V logic only
 - Drive the relay header with a **relay module**, not a bare coil
 - WS2812 5V + GND must be solid; data from D2/D3
-- Stay under ~20 mA on the discrete Attract/Game LEDs (1 kΩ on the board)
+- Stay under ~20 mA on the discrete Attract/Game LEDs (1k on the board)
