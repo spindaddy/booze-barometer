@@ -1,1 +1,5 @@
-@file:///tmp/schematic_embedded.svg
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="400" height="267" viewBox="0 0 400 267">
+  <title>Booze Barometer board schematic</title>
+  <image width="400" height="267" xlink:href="https://files.catbox.moe/sbqvyl.png"/>
+</svg>
