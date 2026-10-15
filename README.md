@@ -15,7 +15,7 @@ DIP switches are read for future options (coins required, extra attempts). Patte
 
 ## Schematic
 
-![Booze Barometer board schematic](board-schematic.svg)
+![Booze Barometer board schematic](schematic.png)
 
 ## Pinout
 
