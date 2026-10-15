@@ -2,69 +2,81 @@
 
 Arduino Nano recreation of the vintage **Booz Barometer** coin-op sobriety skill game (Northwestern Corp., ~1950).
 
-Insert a coin (or press Start for free play), guide the ring along the bent rod without touching, then hit the end switch to win. Touch the wire and you fail.
+## Game flow
+
+1. **ATTRACT** — Attract LED (D4) blinks, FRONT/BACK in attract lighting  
+2. **Coin pulse (A0)** — Attract LED off, Game LED (D5) on, strips switch to game lighting → **WAIT_START**  
+3. **Start (A1)** → **PLAYING** — watch for Win (A3) or Fail (A2)  
+4. **Win (A3)** → **WIN** for 5 seconds (lightshow on D2/D3 + relay pulse on D6)  
+5. **Fail (A2)** → short **FAIL** (fail lights + relay pulse)  
+6. Back to **ATTRACT**
+
+DIP switches are read for future options (coins required, extra attempts). Patterns on WIN/FAIL can be swapped later.
 
 ## Schematic
 
-![Booze Barometer board schematic](image.png)
-
+![Booze Barometer board schematic](board-schematic.svg)
 
 ## Pinout
 
 | Pin | Role |
 |-----|------|
-| A0 | Coin (J1 pin 5) |
-| A1 | Start (J1 pin 2) |
-| A2 | Fail / wire sense (J1 pin 3) |
-| A3 | Win / end of path (J1 pin 4) |
-| D2 | FRONT WS2812 data |
-| D3 | BACK WS2812 data |
+| A0 | Coin (J1-5) |
+| A1 | Start (J1-2) |
+| A2 | Fail / wire (J1-3) |
+| A3 | Win / end (J1-4) |
+| A4 | Dip4 |
+| A5 | Dip3 |
+| A6 | Dip2 (analog-only on Nano) |
+| A7 | Dip1 (analog-only on Nano) |
+| D2 | FRONT WS2812 data (330Ω on board) |
+| D3 | BACK WS2812 data (330Ω on board) |
 | D4 | Attract LED |
 | D5 | Game LED |
-| D6 | Relay module |
-| D7 | Spare |
+| D6 | Relay (330Ω on board) |
+| D7 | Spare (330Ω on board) |
 
-POWER LED is hard-wired to 5V (always on).
+POWER LED is hard-wired to 5V.
 
-### J1 inputs (XH-5)
+### J1 (XH-5)
 
-| J1 | Signal | Nano |
-|----|--------|------|
+| Pin | Signal | Nano |
+|-----|--------|------|
 | 1 | GND | GND |
 | 2 | Start | A1 |
 | 3 | Fail | A2 |
 | 4 | Win | A3 |
 | 5 | Coin | A0 |
 
-Switches: normally open to GND. Firmware uses `INPUT_PULLUP` (active LOW). Board has 100 nF on each signal (C1-C4).
+NO to GND, `INPUT_PULLUP`, 100 nF on each signal.
 
 ### XH-3 outputs (FRONT / BACK / RELAY / SPARE)
 
-| Pin | Net |
-|-----|-----|
-| 1 | 5V |
-| 2 | Signal (D2 / D3 / D6 / D7) |
-| 3 | GND |
+Signal is the center pin (via 330Ω). Outer pins are 5V and GND per the board silkscreen.
 
-FRONT and BACK pin 2 are WS2812 data lines. Set `NUM_FRONT` and `NUM_BACK` in the sketch to your strip lengths.
+### DIP (SW1)
 
-## Game flow
+ON = to GND. Stub mapping in firmware:
 
-1. **IDLE** - amber chase on strips, Attract blinks; coin -> **ARMED**, or Start for free play
-2. **ARMED** - blue pulse; Start -> **PLAYING**
-3. **PLAYING** - Game LED on, green chase, relay held; Fail -> red flash; Win -> rainbow
-4. Return to **IDLE**
+| Switch | Idea (change later) |
+|--------|---------------------|
+| Dip1 + Dip2 | Coins required (1–4) |
+| Dip3 | Extra attempt if ON |
+| Dip4 | Reserved |
+
+**Nano note:** A6/A7 cannot use `INPUT_PULLUP`. Firmware uses `analogRead`. Add 10k pull-ups to 5V on Dip1/Dip2 if those switches float when OFF.
 
 ## Upload
 
-1. Install **Adafruit NeoPixel** from the Library Manager
+1. Install **Adafruit NeoPixel**
 2. Open `booze_barometer/booze_barometer.ino`
 3. Board: **Arduino Nano**
-4. Upload
+4. Set `NUM_FRONT` / `NUM_BACK` to your strip lengths
+5. Upload
 
 ## Wiring notes
 
-- Keep Fail/Win/Coin/Start at 5V logic only (no high voltage on the rod)
-- Use a **relay module** on the RELAY header (transistor + diode), not a bare coil
-- Power long WS2812 strips from a solid 5V supply; share GND with the Nano
-- Attract/Game LEDs use 1k on the board (~few mA)
+- Fail/Win/Coin/Start stay at 5V logic only
+- RELAY header → relay **module**, not a bare coil
+- Long WS2812 runs need a solid 5V supply; share GND with the Nano
+- Board has DC jack + 100 nF / 220 µF on the 5V rail
