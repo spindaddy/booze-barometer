@@ -74,6 +74,23 @@ ON = to GND. Stub mapping in firmware:
 4. Set `NUM_FRONT` / `NUM_BACK` to your strip lengths
 5. Upload
 
+## Desktop monitor (switch / function tester)
+
+Firmware streams JSON status over USB serial at **115200**. Use the Python app to watch switches, DIPs, LEDs, relay, and game state live.
+
+```bash
+./scripts/run-monitor.sh
+# or:
+./scripts/run-monitor.sh --port /dev/cu.usbserial-1110
+```
+
+Opens a browser UI at http://127.0.0.1:8765/ (no Tkinter). Install serial support once with:
+`/usr/bin/python3 -m pip install --user pyserial`
+
+Click **Connect**. Use switch controls (keys `1`–`4`, `R`), **Full win/fail run** scripts, DIP/spare simulation, and LED preview. A “next step” hint and telemetry-stale warning help while testing. **Download log** exports the event list.
+
+Host serial commands: `hit coin|start|fail|win`, `hold fail`, `release fail`, `dip N on|off|clear`, `dips clear`, `spare on|off`, `reset`.
+
 ## Wiring notes
 
 - Fail/Win/Coin/Start stay at 5V logic only
