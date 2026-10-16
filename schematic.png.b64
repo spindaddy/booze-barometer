@@ -1,1 +1,1 @@
-FILE:/tmp/b64_locked/ONLY_29000.txt
+{{json.load(/tmp/PF_RETRY_28000.json).files[0].content}}
