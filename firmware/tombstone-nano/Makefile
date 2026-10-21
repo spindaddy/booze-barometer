@@ -8,10 +8,17 @@ CFLAGS ?= -std=c11 -Wall -Wextra -Werror -pedantic -I.
 CXXFLAGS ?= -std=c++11 -Wall -Wextra -Werror -pedantic -I.
 BUILD := build
 
-.PHONY: test clean
+.PHONY: test demo clean
 
-test: $(BUILD)/test_rules $(BUILD)/nano_board.o $(BUILD)/sketch.o
+test: $(BUILD)/test_rules $(BUILD)/demo $(BUILD)/nano_board.o $(BUILD)/sketch.o
 	./$(BUILD)/test_rules
+	./$(BUILD)/demo --check
+
+demo: $(BUILD)/demo
+
+$(BUILD)/demo: demo.c game.c game.h hw.h lamps.h sound.h operator.h
+	mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -o $@ demo.c game.c
 
 $(BUILD)/test_rules: game.c pins.c test/test_game.c game.h hw.h lamps.h sound.h operator.h pins.h
 	mkdir -p $(BUILD)

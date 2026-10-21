@@ -19,6 +19,7 @@ Game rules are plain C with no Arduino dependency. The sketch is a thin adapter.
 | `nano_board.c` | Reads those pins, clocks the lamp image, latches a sound code |
 | `tombstone-nano.ino` | Sketch |
 | `test/test_game.c` | Host tests |
+| `demo.c` | Terminal playfield that runs `game.c` |
 
 ## Host tests
 
@@ -30,9 +31,31 @@ make test
 
 That compiles `game.c` with the host compiler, runs the rule tests, and typechecks the sketch and the Nano adapter against `test/stub/Arduino.h`. No Arduino core is required.
 
-The tests cover fast, slow, and white-hat scoring, the yellow-lamp timer, one- and two-player start and join, the combined free-game award, the operator threshold, attract mode, and the test/play switch.
+The tests cover fast, slow, and white-hat scoring, the yellow-lamp timer, one- and two-player start and join, the combined free-game award, the operator threshold, attract mode, and the test/play switch. `make test` also runs `./build/demo --check`.
 
 `make clean` removes `build/`.
+
+## Play the demo
+
+`demo.c` is a terminal picture of the flyer playfield. It links the same `game.c` the Nano runs, so a game on the host is a test of those rules. Storefront positions are the inferred ones. This is not the original lamp wiring.
+
+```bash
+make demo
+./build/demo
+```
+
+Run it in a terminal. The default clock is one quarter speed: the 600 ms fast window lasts about 2.4 seconds, which is slow enough to shoot on purpose. `./build/demo --scale 1` uses the firmware clock.
+
+| Key | Action |
+| --- | --- |
+| C | Coin |
+| R | Red transmitter |
+| B | Blue transmitter |
+| T | Test/play |
+| [ ] | Free-game threshold, 10 points at a time |
+| Q | Quit |
+
+One coin and R or B starts that player. A second coin, then the other color within the join window, starts a two-player game. Shoot a steady black hat. A blinking black hat is return fire and costs points. A white hat costs points. The free-game lamp comes on at a combined score of 50 unless you change the threshold.
 
 ## Nano build
 
