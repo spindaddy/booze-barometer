@@ -60,8 +60,9 @@ ATTRACT  --(coin)-->  WAIT FOR START  --(start)-->  PLAYING
 
 - Brain: **Arduino Nano**
 - Strip lighting: **WS2812** on FRONT and BACK headers (set LED counts in the sketch)
+- Firmware may swap D2/D3 via `SWAP_FRONT_BACK` if the cabinet loom is reversed. Boot test: FRONT flashes red, BACK flashes orange.
 - Switches are normally-open to ground (active low, with pull-ups in firmware)
-- Power: 5 V DC jack on the board; long LED runs should share a solid 5 V supply and common ground
+- Power: 5 V DC jack on the board; long LED runs should share a solid 5 V supply and common ground (use a supply with enough amps for both strips + relay)
 
 ## Firmware
 

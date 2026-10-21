@@ -44,14 +44,25 @@ const byte PIN_DIP3    = A5;  // digital OK
 const byte PIN_DIP2    = A6;  // analog-only on Nano
 const byte PIN_DIP1    = A7;  // analog-only on Nano
 
-const byte PIN_FRONT   = 2;
-const byte PIN_BACK    = 3;
 const byte PIN_ATTRACT = 4;
 const byte PIN_GAME    = 5;
 const byte PIN_RELAY   = 6;
 const byte PIN_SPARE   = 7;
 
 // ---- strips (edit to match hardware) ----
+// Schematic: FRONT=D2, BACK=D3. If cabinet “front” LEDs stay dark, set
+// SWAP_FRONT_BACK to 1 (headers / loom often reversed).
+#ifndef SWAP_FRONT_BACK
+#define SWAP_FRONT_BACK 1
+#endif
+#if SWAP_FRONT_BACK
+const byte PIN_FRONT = 3;
+const byte PIN_BACK  = 2;
+#else
+const byte PIN_FRONT = 2;
+const byte PIN_BACK  = 3;
+#endif
+
 const int NUM_FRONT = 30;
 const int NUM_BACK  = 30;
 
@@ -61,15 +72,19 @@ Adafruit_NeoPixel back (NUM_BACK,  PIN_BACK,  NEO_GRB + NEO_KHZ800);
 const unsigned long DEBOUNCE_MS   = 40;
 const unsigned long WIN_HOLD_MS   = 5000;
 const unsigned long FAIL_HOLD_MS  = 1500;
-const unsigned long RELAY_ON_MS   = 300;   // pulse length in WIN/FAIL
+const unsigned long RELAY_ON_MS   = 300;   // single pulse length (FAIL)
+const unsigned long RELAY_PULSE_MS = 250;  // WIN bell: on time per ring
+const unsigned long RELAY_PAUSE_MS = 250;  // WIN bell: off time between rings
+const byte WIN_BELL_RINGS = 4;
+const unsigned long COIN_DING_MS  = 36;    // short bell chirp per coin (~20% of 180ms)
 const unsigned long TELEMETRY_MS  = 100;
 
-// A6/A7 have no INPUT_PULLUP — floating pins sit mid-scale (~400–700).
-// Open pin often reads a low ADC "ghost" when the other is GND (mux crosstalk).
-// Best fix: 10k pull-ups to 5V. Firmware: gap rule + debounce.
-const int DIP_ANALOG_ON_MAX   = 100;  // <= this → candidate ON
-const int DIP_ANALOG_GAP      = 30;   // min raw gap to call the higher pin a ghost
-const byte DIP_DEBOUNCE_HITS  = 4;    // consecutive agreements before change (~400ms)
+// A6/A7 have no INPUT_PULLUP — floating pins sit mid-scale or soft-low together.
+// Best fix: 10k pull-ups to 5V. Firmware: hard-GND threshold + pair reject + debounce.
+const int DIP_ANALOG_ON_MAX   = 40;   // <= this → candidate ON (hard toward GND)
+const int DIP_ANALOG_GAP      = 25;   // min raw gap to call the higher pin a ghost
+const int DIP_ANALOG_PAIR_MAX = 12;   // |a6-a7| at/below this → "tracking together"
+const byte DIP_DEBOUNCE_HITS  = 8;    // consecutive agreements (~800ms)
 
 enum State : byte { ATTRACT, WAIT_START, PLAYING, WIN, FAIL };
 State state = ATTRACT;
@@ -89,6 +104,7 @@ Button btnWin   = { PIN_WIN,   HIGH, HIGH, 0 };
 unsigned long phaseStart = 0;
 unsigned long animTick   = 0;
 unsigned long telemetryTick = 0;
+unsigned long coinDingEnd = 0;
 uint16_t animStep        = 0;
 
 // Attract / win / fail patterns from maze LED sketch (message.txt)
@@ -116,6 +132,8 @@ bool simStart = false;
 bool simFail  = false;
 bool simWin   = false;
 bool simFailHold = false;  // level hold from "hold fail"
+bool failArmed = false;    // false from coin-up until Start (+ brief grace)
+unsigned long failArmAt = 0;
 
 bool dip1On = false;
 bool dip2On = false;
@@ -187,8 +205,14 @@ void debounceAnalogDip(byte idx, bool candidate, bool &state) {
 void classifyAnalogDipPair(int raw1, int raw2, bool &out1, bool &out2) {
   bool c1 = dipAnalogCandidate(raw1);
   bool c2 = dipAnalogCandidate(raw2);
+  int diff = raw1 > raw2 ? (raw1 - raw2) : (raw2 - raw1);
 
-  if (c1 && c2) {
+  // Both pins soft-low and tracking together → float/crosstalk, not a real DIP.
+  // (Live bug: a6≈a7≈20..50 made Dip1 chatter ON/OFF.)
+  if (c1 && c2 && diff <= DIP_ANALOG_PAIR_MAX && !(raw1 <= 8 && raw2 <= 8)) {
+    c1 = false;
+    c2 = false;
+  } else if (c1 && c2) {
     if (raw2 >= raw1 + DIP_ANALOG_GAP) {
       c2 = false;  // Dip2 higher → ghost
     } else if (raw1 >= raw2 + DIP_ANALOG_GAP) {
@@ -196,11 +220,11 @@ void classifyAnalogDipPair(int raw1, int raw2, bool &out1, bool &out2) {
     } else if (raw1 <= 8 && raw2 <= 8) {
       // both hard GND → both ON
     } else if (out1 != out2) {
-      // Ambiguous mid-lows: hold the existing single-ON (stops flicker)
+      // Ambiguous: hold existing single-ON
       c1 = out1;
       c2 = out2;
     } else {
-      // both were ON or both OFF — pick the lower raw as the real switch
+      // pick lower raw as the real switch
       if (raw1 <= raw2) c2 = false;
       else c1 = false;
     }
@@ -332,39 +356,78 @@ void relay(bool on) {
   digitalWrite(PIN_RELAY, on ? HIGH : LOW);
 }
 
-void fillStrip(Adafruit_NeoPixel &s, uint8_t r, uint8_t g, uint8_t b) {
+void startCoinDing() {
+  relay(true);
+  coinDingEnd = millis() + COIN_DING_MS;
+}
+
+void serviceCoinDing() {
+  if (coinDingEnd == 0) return;
+  if ((long)(millis() - coinDingEnd) >= 0) {
+    relay(false);
+    coinDingEnd = 0;
+  }
+}
+
+// WIN: ring bell on/off WIN_BELL_RINGS times, then stay off
+void updateWinRelay() {
+  unsigned long elapsed = millis() - phaseStart;
+  unsigned long cycle = RELAY_PULSE_MS + RELAY_PAUSE_MS;
+  unsigned long ringWindow = (unsigned long)WIN_BELL_RINGS * cycle;
+  if (elapsed >= ringWindow) {
+    relay(false);
+    return;
+  }
+  relay((elapsed % cycle) < RELAY_PULSE_MS);
+}
+
+void paintStrip(Adafruit_NeoPixel &s, uint8_t r, uint8_t g, uint8_t b) {
   for (int i = 0; i < s.numPixels(); i++) {
     s.setPixelColor(i, s.Color(r, g, b));
   }
-  s.show();
 }
 
-void bothSolid(uint8_t r, uint8_t g, uint8_t b) {
-  fillStrip(front, r, g, b);
-  fillStrip(back,  r, g, b);
-}
-
+// Push both strips; short gap so the first strip can latch before the second bit-bang.
 void showBoth() {
   front.show();
+  delayMicroseconds(300);
   back.show();
 }
 
-void setPixelBoth(int i, uint8_t r, uint8_t g, uint8_t b) {
-  if (i < NUM_FRONT) front.setPixelColor(i, front.Color(r, g, b));
-  if (i < NUM_BACK)  back.setPixelColor(i, back.Color(r, g, b));
+void bothSolid(uint8_t r, uint8_t g, uint8_t b) {
+  paintStrip(front, r, g, b);
+  paintStrip(back, r, g, b);
+  showBoth();
 }
 
-// LED looks from maze sketch (message.txt) — red / yellow / orange warm palette
-//   Attract     → cycle warm fade / flash / scroll (10s each)
-//   Wait/Play   → solid warm orange (255,100,20)
+void setPixelBoth(int i, uint8_t r, uint8_t g, uint8_t b) {
+  if (i >= 0 && i < NUM_FRONT) front.setPixelColor(i, front.Color(r, g, b));
+  if (i >= 0 && i < NUM_BACK)  back.setPixelColor(i, back.Color(r, g, b));
+}
+
+// LED looks — warm white front for attract/game; win/fail keep warm scroll / police
+//   Attract     → warm white fade in / fade out (breathe)
+//   Wait/Play   → solid warm white
 //   Win         → warm scroll
 //   Fail        → orange/red half “police” flash
 
+// Warm white base (scaled for fade / solid)
+// Keep G well below R so WS2812 never reads as green
+const uint8_t WW_R = 255;
+const uint8_t WW_G = 140;
+const uint8_t WW_B = 60;
+
 void setSolidWarm() {
+  // Game mode: solid warm white
+  bothSolid(WW_R, WW_G, WW_B);
+}
+
+void setSolidWarmOrange() {
   bothSolid(255, 100, 20);
 }
 
-void warmFadeAnimation() {
+void warmWhiteFadeAnimation() {
+  // Attract: breathe warm white 0 → full → 0
   if (millis() - animTick < 20) return;
   animTick = millis();
 
@@ -383,16 +446,9 @@ void warmFadeAnimation() {
     }
   }
 
-  uint8_t r, g, b;
-  if (fadeStep < 128) {
-    r = 255;
-    g = (uint8_t)map(fadeStep, 0, 127, 0, 100);
-    b = 0;
-  } else {
-    r = 255;
-    g = (uint8_t)map(fadeStep, 128, 255, 100, 160);
-    b = (uint8_t)map(fadeStep, 128, 255, 0, 60);
-  }
+  uint8_t r = (uint8_t)((uint16_t)WW_R * fadeStep / 255);
+  uint8_t g = (uint8_t)((uint16_t)WW_G * fadeStep / 255);
+  uint8_t b = (uint8_t)((uint16_t)WW_B * fadeStep / 255);
   bothSolid(r, g, b);
 }
 
@@ -463,29 +519,23 @@ void setPoliceFlash() {
 
 void animAttract() {
   unsigned long now = millis();
-  if (now - animStartTime > ATTRACT_ANIM_MS) {
-    currentAttractAnim = random(0, 3);  // fade / flash / scroll
-    animStartTime = now;
-    fadeStep = 0;
-    fadeForward = true;
-    flashStep = 0;
-    scrollOffset = 0;
-  }
-
-  switch (currentAttractAnim) {
-    case 0: warmFadeAnimation(); break;
-    case 1: warmFlashAnimation(); break;
-    default: warmScrollAnimation(); break;
-  }
+  warmWhiteFadeAnimation();
   setBoardLeds((now / 500) % 2 == 0, false);
 }
 
 void animWaitStart() {
+  // After coins: solid warm white (+ Game LED) until Start.
   setSolidWarm();
   setBoardLeds(false, true);
 }
 
 void animPlaying() {
+  // During play: solid warm white, Game LED on
+  if (millis() - animTick < 100) {
+    setBoardLeds(false, true);
+    return;
+  }
+  animTick = millis();
   setSolidWarm();
   setBoardLeds(false, true);
 }
@@ -503,9 +553,19 @@ void animFail() {
 }
 
 // ---- state entry ----
+void clearFailEdge() {
+  btnFail.stable = HIGH;
+  btnFail.lastRaw = digitalRead(PIN_FAIL);
+  btnFail.lastChange = millis();
+  simFail = false;
+  simFailHold = false;
+}
+
 void enterAttract() {
   state = ATTRACT;
   coinsSeen = 0;
+  failArmed = false;
+  failArmAt = 0;
   relay(false);
   animStep = 0;
   animTick = 0;
@@ -520,7 +580,11 @@ void enterAttract() {
 
 void enterWaitStart() {
   state = WAIT_START;
-  relay(false);
+  failArmed = false;
+  failArmAt = 0;
+  clearFailEdge();  // ignore Fail from coin-up until Start
+  // Keep coin ding running — do not relay(false) here (1-coin path killed the chirp)
+  if (coinDingEnd == 0) relay(false);
   setBoardLeds(false, true);  // Attract off, Game on
   animStep = 0;
   animTick = 0;
@@ -531,10 +595,10 @@ void enterWaitStart() {
 void enterPlaying() {
   state = PLAYING;
   relay(false);
-  // clear fail so seating the ring does not instant-fail
-  btnFail.stable = HIGH;
-  btnFail.lastRaw = digitalRead(PIN_FAIL);
-  btnFail.lastChange = millis();
+  // Arm Fail shortly after Start so a held fail wire cannot instant-fail
+  failArmed = false;
+  failArmAt = millis() + 300;
+  clearFailEdge();
   btnWin.stable = HIGH;
   btnWin.lastRaw = digitalRead(PIN_WIN);
   btnWin.lastChange = millis();
@@ -548,6 +612,7 @@ void enterPlaying() {
 void enterWin() {
   state = WIN;
   phaseStart = millis();
+  coinDingEnd = 0;
   relay(true);
   animStep = 0;
   animTick = 0;
@@ -559,6 +624,7 @@ void enterWin() {
 void enterFail() {
   state = FAIL;
   phaseStart = millis();
+  coinDingEnd = 0;
   relay(true);
   animStep = 0;
   animTick = 0;
@@ -692,16 +758,31 @@ void setup() {
 
   front.begin();
   back.begin();
-  front.setBrightness(80);
-  back.setBrightness(80);
+  front.setBrightness(200);
+  back.setBrightness(200);
   front.clear();
   back.clear();
-  front.show();
-  back.show();
+  showBoth();
+
+  // Boot check: FRONT = red, BACK = orange (no green in palette)
+  paintStrip(front, 255, 0, 0);
+  paintStrip(back, 0, 0, 0);
+  showBoth();
+  delay(600);
+  paintStrip(front, 0, 0, 0);
+  paintStrip(back, 255, 100, 0);
+  showBoth();
+  delay(600);
+  bothSolid(0, 0, 0);
 
   randomSeed(analogRead(A0) ^ micros());
   enterAttract();
   Serial.println(F("{\"type\":\"hello\",\"device\":\"booze-barometer\",\"baud\":115200}"));
+#if SWAP_FRONT_BACK
+  Serial.println(F("{\"type\":\"event\",\"name\":\"strips\",\"value\":\"swapped_front_on_D3\"}"));
+#else
+  Serial.println(F("{\"type\":\"event\",\"name\":\"strips\",\"value\":\"front_on_D2\"}"));
+#endif
   sendTelemetry();
 }
 
@@ -723,14 +804,17 @@ void loop() {
         coinsSeen++;
         readDips();
         emitEventInt("coin", coinsSeen);
+        startCoinDing();
         if (coinsSeen >= coinsNeeded) {
           enterWaitStart();
         }
       }
+      serviceCoinDing();
       break;
 
     case WAIT_START:
       animWaitStart();
+      serviceCoinDing();  // finish ding after last coin → WAIT_START
       if (startJust) {
         emitEvent("start", "1");
         enterPlaying();
@@ -739,7 +823,12 @@ void loop() {
 
     case PLAYING:
       animPlaying();
-      if (failDown) {
+      if (!failArmed && failArmAt != 0 && (long)(millis() - failArmAt) >= 0) {
+        failArmed = true;
+        failArmAt = 0;
+        clearFailEdge();  // drop any Fail held through Start
+      }
+      if (failArmed && failDown) {
         emitEvent("fail", "1");
         enterFail();
       } else if (winJust) {
@@ -750,9 +839,7 @@ void loop() {
 
     case WIN:
       animWin();
-      if (millis() - phaseStart >= RELAY_ON_MS) {
-        relay(false);
-      }
+      updateWinRelay();
       if (millis() - phaseStart >= WIN_HOLD_MS) {
         enterAttract();
       }

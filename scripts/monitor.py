@@ -359,43 +359,18 @@ function paintStrip(dots, colors) {
 }
 
 function simPixels(state, ms, phaseElapsed) {
-  // Patterns from maze LED sketch (message.txt)
   const front = Array.from({ length: NUM }, () => [0, 0, 0]);
   const back = Array.from({ length: NUM }, () => [0, 0, 0]);
-  const warm = [255, 100, 20];
+  const ww = [255, 140, 60];  // warm white (matches firmware; low G = not green)
 
   if (state === "WAIT_START" || state === "PLAYING") {
-    for (let i = 0; i < NUM; i++) { front[i] = warm; back[i] = warm; }
+    for (let i = 0; i < NUM; i++) { front[i] = ww; back[i] = ww; }
   } else if (state === "ATTRACT") {
-    const mode = Math.floor(ms / 10000) % 3;
-    if (mode === 0) {
-      // warm fade red→orange→yellowish
-      const t = (ms % 10000) / 10000;
-      const step = Math.floor(t < 0.5 ? t * 2 * 255 : (1 - t) * 2 * 255);
-      let r = 255, g = 0, b = 0;
-      if (step < 128) g = Math.round((step / 127) * 100);
-      else { g = Math.round(100 + ((step - 128) / 127) * 60); b = Math.round(((step - 128) / 127) * 60); }
-      for (let i = 0; i < NUM; i++) { front[i] = [r, g, b]; back[i] = [r, g, b]; }
-    } else if (mode === 1) {
-      // white / red / orange / yellow flash
-      const flashColors = [[255,255,255],[255,0,0],[255,255,255],[255,100,0],[255,255,255],[255,255,0]];
-      const idx = Math.floor(ms / 750) % 6;
-      const c = flashColors[idx];
-      for (let i = 0; i < NUM; i++) { front[i] = c; back[i] = c; }
-    } else {
-      // warm scroll
-      const off = Math.floor(ms / 60) % 12;
-      for (let i = 0; i < NUM; i++) {
-        const pos = (i + off) % 12;
-        let c;
-        if (pos <= 1) c = [255, 160, 60];
-        else if (pos <= 3) c = [255, 100, 0];
-        else if (pos <= 5) c = [255, 60, 0];
-        else if (pos <= 7) c = [255, 0, 0];
-        else c = [50, 0, 0];
-        front[i] = c; back[i] = c;
-      }
-    }
+    // Warm white breathe (~10s full cycle)
+    const t = (ms % 10000) / 10000;
+    const step = t < 0.5 ? t * 2 : (1 - t) * 2;
+    const c = ww.map((v) => Math.round(v * step));
+    for (let i = 0; i < NUM; i++) { front[i] = c; back[i] = c; }
   } else if (state === "WIN") {
     const off = Math.floor(ms / 60) % 12;
     for (let i = 0; i < NUM; i++) {
@@ -776,11 +751,20 @@ class MonitorState:
     def connect(self, device: str) -> tuple[bool, str]:
         self.disconnect()
         try:
-            ser = serial.Serial(device, BAUD, timeout=0.2)
+            # Avoid toggling DTR/RTS on open — that resets the Nano and wipes credits.
+            ser = serial.Serial()
+            ser.port = device
+            ser.baudrate = BAUD
+            ser.timeout = 0.2
+            ser.dsrdtr = False
+            ser.rtscts = False
+            ser.dtr = False
+            ser.rts = False
+            ser.open()
         except serial.SerialException as exc:
             self.status_text = f"Connect failed: {exc}"
             return False, self.status_text
-        time.sleep(1.6)
+        time.sleep(0.4)
         try:
             ser.reset_input_buffer()
         except Exception:
