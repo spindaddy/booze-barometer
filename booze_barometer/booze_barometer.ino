@@ -77,9 +77,10 @@ enum HeaderSection : byte {
   HDR_GO,      // Go!
   HDR_LEFT,    // "Left"
   HDR_ATTEMPTS,// "Attempts"
-  HDR_DIGIT3,  // "3"
-  HDR_DIGIT2,  // "2"
+  // Digits in chain order as wired (1 then 2 then 3 — 3 and 1 swapped vs first layout)
   HDR_DIGIT1,  // "1"
+  HDR_DIGIT2,  // "2"
+  HDR_DIGIT3,  // "3"
   HDR_SECTIONS
 };
 const byte HDR_LEN[HDR_SECTIONS] = {
@@ -88,9 +89,9 @@ const byte HDR_LEN[HDR_SECTIONS] = {
   5,   // Go!
   2,   // Left
   5,   // Attempts
-  1,   // 3
-  1,   // 2
   1,   // 1
+  1,   // 2
+  1,   // 3
 };
 const int NUM_HEADER = 38;  // 11+12+5+2+5+1+1+1
 const byte HDR_MASK_ALL = 0xFF;

@@ -240,9 +240,9 @@ const GROUPS = {
 // Header sections in chain order (matches HDR_LEN in firmware)
 const HEADER_SECTIONS = [
   ["Insert Token", 11], ["Proceed to Start", 12], ["Go!", 5],
-  ["Left", 2], ["Attempts", 5], ["3", 1], ["2", 1], ["1", 1],
+  ["Left", 2], ["Attempts", 5], ["1", 1], ["2", 1], ["3", 1],
 ];
-const HDR = { TOKEN:0, START:1, GO:2, LEFT:3, ATTEMPTS:4, D3:5, D2:6, D1:7 };
+const HDR = { TOKEN:0, START:1, GO:2, LEFT:3, ATTEMPTS:4, D1:5, D2:6, D3:7 };
 const ATTEMPTS_PER_CREDIT = 3;
 const NEXT = {
   ATTRACT: "Next: hit Coin → WAIT_START (header: Insert Token blink + Left/Attempts/3)",

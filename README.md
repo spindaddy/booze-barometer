@@ -49,9 +49,9 @@ Optional **DIP switches** can set things like how many coin pulses are needed, o
 | 3 | Go! | 5 |
 | 4 | Left | 2 |
 | 5 | Attempts | 5 |
-| 6 | 3 | 1 |
+| 6 | 1 | 1 |
 | 7 | 2 | 1 |
-| 8 | 1 | 1 |
+| 8 | 3 | 1 |
 
 | Game state | Header |
 |------------|--------|
@@ -91,6 +91,20 @@ ATTRACT  --(coin)-->  WAIT FOR START  --(start)-->  PLAYING
 - Firmware may swap D2/D3 via `SWAP_FRONT_BACK` if the cabinet loom is reversed. Boot test: FRONT flashes red, BACK flashes orange.
 - Switches are normally-open to ground (active low, with pull-ups in firmware)
 - Power: 5 V DC jack on the board; long LED runs should share a solid 5 V supply and common ground (use a supply with enough amps for both strips + relay)
+
+### LED strip hookup map
+
+Wiring diagram for FRONT (D2), BACK (D3), and HEADER / Spare (D7), including header section pixel ranges:
+
+![LED strip hookup map](led-strip-hookup.svg)
+
+| Board header | Schematic data pin | Strip | Count |
+|--------------|--------------------|-------|-------|
+| FRONT | D2 (via 330 Ω) | Cabinet front | 30 |
+| BACK | D3 (via 330 Ω) | Cabinet back | 30 |
+| SPARE | D7 (via 330 Ω) | Light-up header | 38 |
+
+Each strip needs **+5 V**, **GND** (common with the board), and **DIN**. Header sections are chained from DIN: Insert Token → Proceed to Start → Go! → Left → Attempts → **1 → 2 → 3**.
 
 ## Firmware
 
