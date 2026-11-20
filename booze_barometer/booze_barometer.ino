@@ -12,7 +12,7 @@
  *   A4 Dip4    A5 Dip3     A6 Dip2    A7 Dip1   (DIP to GND when ON)
  *   D2 FRONT WS2812 (via 330R)   D3 BACK WS2812 (via 330R)
  *   D4 Attract LED               D5 Game LED
- *   D6 Relay (via 330R)          D7 Spare (via 330R)
+ *   D6 Relay (via 330R)          D7 HEADER WS2812 (Spare port, via 330R)
  *
  * Serial monitor (115200): JSON status lines for the desktop test app.
  *   {"type":"status",...}
@@ -22,7 +22,7 @@
  *   hold fail | release fail
  *   dip 1 on|off|clear   (also dip 2..4)
  *   dips clear
- *   spare on | spare off
+ *   header test on | header test off   (all header sections lit)
  *   reset
  *
  * Note: Nano A6/A7 are analog-only (no INPUT_PULLUP). Read with analogRead.
@@ -47,7 +47,7 @@ const byte PIN_DIP1    = A7;  // analog-only on Nano
 const byte PIN_ATTRACT = 4;
 const byte PIN_GAME    = 5;
 const byte PIN_RELAY   = 6;
-const byte PIN_SPARE   = 7;
+const byte PIN_HEADER  = 7;   // Spare port → light-up header
 
 // ---- strips (edit to match hardware) ----
 // Schematic: FRONT=D2, BACK=D3. If cabinet “front” LEDs stay dark, set
@@ -68,6 +68,39 @@ const int NUM_BACK  = 30;
 
 Adafruit_NeoPixel front(NUM_FRONT, PIN_FRONT, NEO_GRB + NEO_KHZ800);
 Adafruit_NeoPixel back (NUM_BACK,  PIN_BACK,  NEO_GRB + NEO_KHZ800);
+
+// ---- light-up header (D7) ----
+// Sections in chain order, starting at the end wired to D7.
+enum HeaderSection : byte {
+  HDR_TOKEN,   // Insert Token
+  HDR_START,   // Proceed to Start
+  HDR_GO,      // Go!
+  HDR_LEFT,    // "Left"
+  HDR_ATTEMPTS,// "Attempts"
+  HDR_DIGIT3,  // "3"
+  HDR_DIGIT2,  // "2"
+  HDR_DIGIT1,  // "1"
+  HDR_SECTIONS
+};
+const byte HDR_LEN[HDR_SECTIONS] = {
+  11,  // Insert Token
+  12,  // Proceed to Start
+  5,   // Go!
+  2,   // Left
+  5,   // Attempts
+  1,   // 3
+  1,   // 2
+  1,   // 1
+};
+const int NUM_HEADER = 38;  // 11+12+5+2+5+1+1+1
+const byte HDR_MASK_ALL = 0xFF;
+const byte ATTEMPTS_PER_CREDIT = 3;
+const uint8_t HEADER_BRIGHTNESS = 160;
+const unsigned long HDR_TOKEN_BLINK_MS = 500;
+const unsigned long HDR_START_BLINK_MS = 400;
+const unsigned long HDR_WIN_STEP_MS    = 150;
+
+Adafruit_NeoPixel header(NUM_HEADER, PIN_HEADER, NEO_GRB + NEO_KHZ800);
 
 const unsigned long DEBOUNCE_MS   = 40;
 const unsigned long WIN_HOLD_MS   = 5000;
@@ -119,7 +152,7 @@ int scrollOffset = 0;
 bool policeFlip = true;
 
 int coinsNeeded  = 1;   // from DIP (stub)
-int attemptsLeft = 1;   // from DIP (stub)
+int attemptsLeft = ATTEMPTS_PER_CREDIT;  // 3 → 2 → 1 → game over
 int coinsSeen    = 0;
 
 bool attractLedOn = false;
@@ -142,7 +175,9 @@ bool dip4On = false;
 bool dipForce[4] = { false, false, false, false };
 bool dipForceOn[4] = { false, false, false, false };
 byte dipDebounceCount[2] = { 0, 0 };
-bool spareOn = false;
+bool headerTest = false;   // host "header test on" → every section lit
+byte headerMask = 0;       // sections currently lit (bit n = section n+1)
+byte headerFrame = 0xFF;   // last pushed mask + color flag; 0xFF forces first paint
 int  a6Raw  = 1023;
 int  a7Raw  = 1023;
 
@@ -278,16 +313,10 @@ void readDips() {
 
   // Stub mapping (change when you decide options):
   //   Dip1+Dip2 = coins required (1..4)
-  //   Dip3      = extra attempt if ON
+  //   Dip3      = reserved (attempts fixed at 3 per credit)
   //   Dip4      = reserved
   int coinCode = (dip1On ? 1 : 0) | (dip2On ? 2 : 0);
   coinsNeeded = coinCode + 1;          // 1..4
-  attemptsLeft = dip3On ? 2 : 1;
-}
-
-void setSpare(bool on) {
-  spareOn = on;
-  digitalWrite(PIN_SPARE, on ? HIGH : LOW);
 }
 
 void sendTelemetry() {
@@ -337,8 +366,10 @@ void sendTelemetry() {
   Serial.print(gameLedOn ? 1 : 0);
   Serial.print(F(",\"relay\":"));
   Serial.print(relayOn ? 1 : 0);
-  Serial.print(F(",\"spare\":"));
-  Serial.print(spareOn ? 1 : 0);
+  Serial.print(F(",\"hdr\":"));
+  Serial.print(headerMask);
+  Serial.print(F(",\"hdr_test\":"));
+  Serial.print(headerTest ? 1 : 0);
   Serial.print(F(",\"fail_hold\":"));
   Serial.print(simFailHold ? 1 : 0);
   Serial.println(F("}"));
@@ -517,6 +548,78 @@ void setPoliceFlash() {
   policeFlip = !policeFlip;
 }
 
+void paintHeader(byte mask, uint8_t r, uint8_t g, uint8_t b) {
+  int px = 0;
+  for (byte s = 0; s < HDR_SECTIONS; s++) {
+    uint32_t c = (mask & bit(s)) ? header.Color(r, g, b) : 0;
+    for (byte k = 0; k < HDR_LEN[s]; k++) {
+      header.setPixelColor(px++, c);
+    }
+  }
+}
+
+// Digit LED for attempts remaining (3 / 2 / 1). Off when none left.
+byte headerDigitMask() {
+  if (attemptsLeft >= 3) return bit(HDR_DIGIT3);
+  if (attemptsLeft == 2) return bit(HDR_DIGIT2);
+  if (attemptsLeft == 1) return bit(HDR_DIGIT1);
+  return 0;
+}
+
+// Left + Attempts + current digit
+byte headerStatusMask() {
+  return bit(HDR_LEFT) | bit(HDR_ATTEMPTS) | headerDigitMask();
+}
+
+// Header by state:
+//   ATTRACT    → Insert Token + Left + Attempts + digit (token blinks)
+//   WAIT_START → Left + Attempts + digit + "Proceed to Start" blinking
+//   PLAYING    → Left + Attempts + digit + "Go!"
+//   WIN        → sections fill 1→8, flash all, repeat
+//   FAIL       → Left + Attempts + digit flash red with the strips
+void updateHeader() {
+  unsigned long now = millis();
+  byte mask = 0;
+  bool red = false;
+  byte status = headerStatusMask();
+
+  if (headerTest) {
+    mask = HDR_MASK_ALL;
+  } else {
+    switch (state) {
+      case ATTRACT:
+        mask = status;
+        if ((now / HDR_TOKEN_BLINK_MS) % 2 == 0) mask |= bit(HDR_TOKEN);
+        break;
+      case WAIT_START:
+        mask = status;
+        if ((now / HDR_START_BLINK_MS) % 2 == 0) mask |= bit(HDR_START);
+        break;
+      case PLAYING:
+        mask = status | bit(HDR_GO);
+        break;
+      case WIN: {
+        byte step = ((now - phaseStart) / HDR_WIN_STEP_MS) % (HDR_SECTIONS + 2);
+        if (step < HDR_SECTIONS) mask = (byte)(bit(step + 1) - 1);
+        else if (step == HDR_SECTIONS) mask = HDR_MASK_ALL;
+        break;
+      }
+      case FAIL:
+        mask = policeFlip ? status : 0;
+        red = true;
+        break;
+    }
+  }
+
+  byte frame = mask | (red ? 0x80 : 0);
+  if (frame == headerFrame) return;  // only bit-bang on change (keeps serial RX clean)
+  headerFrame = frame;
+  headerMask = mask;
+  if (red) paintHeader(mask, 255, 0, 0);
+  else     paintHeader(mask, WW_R, WW_G, WW_B);
+  header.show();
+}
+
 void animAttract() {
   unsigned long now = millis();
   warmWhiteFadeAnimation();
@@ -525,6 +628,9 @@ void animAttract() {
 
 void animWaitStart() {
   // After coins: solid warm white (+ Game LED) until Start.
+  // Throttled: show() blocks interrupts, so repainting every pass drops serial bytes.
+  if (millis() - animTick < 100) return;
+  animTick = millis();
   setSolidWarm();
   setBoardLeds(false, true);
 }
@@ -564,6 +670,7 @@ void clearFailEdge() {
 void enterAttract() {
   state = ATTRACT;
   coinsSeen = 0;
+  attemptsLeft = ATTEMPTS_PER_CREDIT;
   failArmed = false;
   failArmAt = 0;
   relay(false);
@@ -625,12 +732,15 @@ void enterFail() {
   state = FAIL;
   phaseStart = millis();
   coinDingEnd = 0;
+  if (attemptsLeft > 0) attemptsLeft--;
+  headerFrame = 0xFF;  // force digit refresh (3→2→1)
   relay(true);
   animStep = 0;
   animTick = 0;
   policeFlip = true;
   currentAttractAnim = 0;
   emitEvent("state", "FAIL");
+  emitEventInt("attempts", attemptsLeft);
 }
 
 void handleHostCommand(char *line) {
@@ -696,20 +806,20 @@ void handleHostCommand(char *line) {
     return;
   }
 
-  if (strcmp(line, "spare on") == 0) {
-    setSpare(true);
-    emitEvent("sim", "spare_on");
+  if (strcmp(line, "header test on") == 0) {
+    headerTest = true;
+    emitEvent("sim", "header_test_on");
     return;
   }
-  if (strcmp(line, "spare off") == 0) {
-    setSpare(false);
-    emitEvent("sim", "spare_off");
+  if (strcmp(line, "header test off") == 0) {
+    headerTest = false;
+    emitEvent("sim", "header_test_off");
     return;
   }
 
   if (strcmp(line, "reset") == 0) {
     simFailHold = false;
-    setSpare(false);
+    headerTest = false;
     enterAttract();
     emitEvent("sim", "reset");
   }
@@ -750,19 +860,21 @@ void setup() {
   pinMode(PIN_ATTRACT, OUTPUT);
   pinMode(PIN_GAME,    OUTPUT);
   pinMode(PIN_RELAY,   OUTPUT);
-  pinMode(PIN_SPARE,   OUTPUT);
 
   relay(false);
-  setSpare(false);
   setBoardLeds(false, false);
 
   front.begin();
   back.begin();
+  header.begin();
   front.setBrightness(200);
   back.setBrightness(200);
+  header.setBrightness(HEADER_BRIGHTNESS);
   front.clear();
   back.clear();
+  header.clear();
   showBoth();
+  header.show();
 
   // Boot check: FRONT = red, BACK = orange (no green in palette)
   paintStrip(front, 255, 0, 0);
@@ -774,6 +886,15 @@ void setup() {
   showBoth();
   delay(600);
   bothSolid(0, 0, 0);
+
+  // Boot check: walk header sections one at a time (verifies section lengths)
+  for (byte s = 0; s < HDR_SECTIONS; s++) {
+    paintHeader(bit(s), WW_R, WW_G, WW_B);
+    header.show();
+    delay(300);
+  }
+  paintHeader(0, 0, 0, 0);
+  header.show();
 
   randomSeed(analogRead(A0) ^ micros());
   enterAttract();
@@ -815,7 +936,8 @@ void loop() {
     case WAIT_START:
       animWaitStart();
       serviceCoinDing();  // finish ding after last coin → WAIT_START
-      if (startJust) {
+      // Start only after Fail is clear — player must leave the wire / return to start
+      if (startJust && !failDown) {
         emitEvent("start", "1");
         enterPlaying();
       }
@@ -851,11 +973,17 @@ void loop() {
         relay(false);
       }
       if (millis() - phaseStart >= FAIL_HOLD_MS) {
-        // Extra attempts (Dip3) can be hooked here later
-        enterAttract();
+        // 3 attempts: after fail show new digit; if any left → wait for Start again
+        if (attemptsLeft > 0) {
+          enterWaitStart();
+        } else {
+          enterAttract();
+        }
       }
       break;
   }
+
+  updateHeader();
 
   unsigned long now = millis();
   if (now - telemetryTick >= TELEMETRY_MS) {

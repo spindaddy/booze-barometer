@@ -35,7 +35,35 @@ Optional **DIP switches** can set things like how many coin pulses are needed, o
 | **Attract LED** | Blinks in attract mode |
 | **Game LED** | On while credited / playing |
 | **FRONT / BACK LED strips** | Attract pattern, then game lighting, then win/fail shows |
+| **Light-up header** (Spare port D7) | Lit sign sections that tell the player what to do (see below) |
 | **Relay** | Short pulse on win or fail (bell, lockout, lamp, etc. — use a relay *module*) |
+
+### Light-up header
+
+38 WS2812 LEDs on the Spare port (D7), chained in this order from the D7 end:
+
+| # | Section | LEDs |
+|---|---------|------|
+| 1 | Insert Token | 11 |
+| 2 | Proceed to Start | 12 |
+| 3 | Go! | 5 |
+| 4 | Left | 2 |
+| 5 | Attempts | 5 |
+| 6 | 3 | 1 |
+| 7 | 2 | 1 |
+| 8 | 1 | 1 |
+
+| Game state | Header |
+|------------|--------|
+| Attract | **Insert Token** blinking + Left + Attempts + **3** |
+| Wait for start | Left + Attempts + digit + **Proceed to Start** blinking |
+| Playing | Left + Attempts + digit + **Go!** |
+| Win | Sections fill 1→8, flash all, repeat |
+| Fail | Left + Attempts + digit flash red; digit steps **3→2→1**; after 3rd fail → attract |
+
+Each credit gets **3 attempts**. After a fail the digit drops (3→2→1). After the third fail the game ends and returns to attract. After fail 1 or 2 it returns to wait-for-start: the player must get off the wire (Fail clear) and press **Start** before the next attempt.
+
+At power-up the header lights each section one at a time so you can check the section boundaries. Section lengths live in `HDR_LEN` in the sketch.
 
 ## Playing a round
 

@@ -120,6 +120,10 @@ HTML = r"""<!DOCTYPE html>
     width:14px; height:14px; border-radius:3px; flex:0 0 auto;
     background:#1a1a1c; box-shadow: inset 0 0 0 1px #2a2a2c;
   }
+  .header-strip { gap:10px; flex-wrap:wrap; overflow:visible; }
+  .hdr-sec { display:flex; flex-direction:column; gap:5px; }
+  .hdr-sec .px-row { display:flex; gap:3px; }
+  .hdr-sec span { font-size:10px; color:var(--muted); font-family: ui-monospace, Menlo, monospace; white-space:nowrap; }
   kbd { font: 11px ui-monospace, Menlo, monospace; padding:1px 5px; border-radius:4px; background:#000; border:1px solid #444; }
 </style>
 </head>
@@ -130,6 +134,7 @@ HTML = r"""<!DOCTYPE html>
     <select id="port"></select>
     <button class="secondary" id="refresh">Refresh</button>
     <button id="connect">Connect</button>
+    <button class="secondary" id="previewBtn" type="button">Preview (no board)</button>
   </div>
   <div id="status">Loading…</div>
 </header>
@@ -138,14 +143,16 @@ HTML = r"""<!DOCTYPE html>
   <div class="state">
     <strong>Game state</strong>
     <div id="gameState">—</div>
-    <div id="nextHint" class="idle">Connect to see the next step</div>
+    <div id="attemptsBadge" style="margin-top:8px;font-size:18px;font-weight:700;color:#64d2ff;">Attempts left: —</div>
+    <div id="nextHint" class="idle">Connect or use Preview to test</div>
   </div>
   <div class="scripts">
     <h2>Guided playthrough</h2>
-    <p>Auto-sends the switch sequence with short delays. Stops if you disconnect.</p>
+    <p>Auto-sends the switch sequence with short delays. Works on the board or in Preview.</p>
     <div class="script-row">
       <button id="runWin" type="button">Full win run</button>
-      <button id="runFail" class="failrun" type="button">Full fail run</button>
+      <button id="runFail" class="failrun" type="button">1 fail → back to Start</button>
+      <button id="runThreeFail" class="failrun" type="button">3 fails → game over</button>
       <button id="runStop" class="secondary" type="button">Stop script</button>
     </div>
   </div>
@@ -161,7 +168,7 @@ HTML = r"""<!DOCTYPE html>
     </div>
   </div>
   <div class="dipsim">
-    <h2>DIP / spare simulation</h2>
+    <h2>DIP / header simulation</h2>
     <p>Forces DIP state in firmware (overrides hardware until cleared). Dip1+Dip2 → coins needed.</p>
     <div class="dip-row">
       <button class="secondary dip-toggle" id="forceDip1" type="button" data-dip="1">Force Dip1</button>
@@ -169,7 +176,7 @@ HTML = r"""<!DOCTYPE html>
       <button class="secondary dip-toggle" id="forceDip3" type="button" data-dip="3">Force Dip3</button>
       <button class="secondary dip-toggle" id="forceDip4" type="button" data-dip="4">Force Dip4</button>
       <button class="secondary" id="dipsClear" type="button">Clear DIP forces</button>
-      <button class="secondary" id="spareToggle" type="button">Spare D7</button>
+      <button class="secondary" id="headerTestToggle" type="button">Header test</button>
     </div>
   </div>
   <div class="leds">
@@ -178,7 +185,10 @@ HTML = r"""<!DOCTYPE html>
       <div class="bulb-wrap"><div class="bulb" id="bulbAttract"></div><span>Attract D4</span></div>
       <div class="bulb-wrap"><div class="bulb" id="bulbGame"></div><span>Game D5</span></div>
       <div class="bulb-wrap"><div class="bulb" id="bulbRelay"></div><span>Relay D6</span></div>
-      <div class="bulb-wrap"><div class="bulb" id="bulbSpare"></div><span>Spare D7</span></div>
+    </div>
+    <div class="strip-block">
+      <div class="strip-label">Header WS2812 · D7 · 38 px · Insert Token / Proceed / Go! / Left / Attempts / 3 / 2 / 1</div>
+      <div class="strip header-strip" id="stripHeader"></div>
     </div>
     <div class="strip-block">
       <div class="strip-label">Front WS2812 · D2 · 30 px</div>
@@ -225,14 +235,21 @@ const GROUPS = {
   sw: [["coin","Coin  A0"],["start","Start A1"],["fail","Fail  A2"],["win","Win   A3"]],
   raw: [["coin_raw","Coin raw"],["start_raw","Start raw"],["fail_raw","Fail raw"],["win_raw","Win raw"]],
   dip: [["dip1","Dip1 A7"],["dip2","Dip2 A6"],["dip3","Dip3 A5"],["dip4","Dip4 A4"]],
-  out: [["attract","Attract LED D4"],["game","Game LED D5"],["relay","Relay D6"],["spare","Spare D7"]],
+  out: [["attract","Attract LED D4"],["game","Game LED D5"],["relay","Relay D6"],["hdr_test","Header test D7"]],
 };
+// Header sections in chain order (matches HDR_LEN in firmware)
+const HEADER_SECTIONS = [
+  ["Insert Token", 11], ["Proceed to Start", 12], ["Go!", 5],
+  ["Left", 2], ["Attempts", 5], ["3", 1], ["2", 1], ["1", 1],
+];
+const HDR = { TOKEN:0, START:1, GO:2, LEFT:3, ATTEMPTS:4, D3:5, D2:6, D1:7 };
+const ATTEMPTS_PER_CREDIT = 3;
 const NEXT = {
-  ATTRACT: "Next: hit Coin (enough coins → WAIT_START)",
-  WAIT_START: "Next: hit Start → PLAYING",
-  PLAYING: "Next: hit Win or hold/tap Fail",
+  ATTRACT: "Next: hit Coin → WAIT_START (header: Insert Token blink + Left/Attempts/3)",
+  WAIT_START: "Next: clear Fail if held, then hit Start (must return to start each attempt)",
+  PLAYING: "Next: Win, or Fail (digit drops 3→2→1; after 3rd fail → game over)",
   WIN: "Waiting — win lightshow, then back to ATTRACT",
-  FAIL: "Waiting — fail lightshow, then back to ATTRACT",
+  FAIL: "Fail anim — if attempts left → WAIT_START; else ATTRACT",
 };
 const flags = {};
 function buildGroup(id, items) {
@@ -264,10 +281,35 @@ function buildStrip(el) {
 }
 const frontDots = buildStrip(document.getElementById("stripFront"));
 const backDots = buildStrip(document.getElementById("stripBack"));
+
+function buildHeader(el) {
+  el.innerHTML = "";
+  const sections = [];
+  HEADER_SECTIONS.forEach(([label, count], idx) => {
+    const sec = document.createElement("div");
+    sec.className = "hdr-sec";
+    const row = document.createElement("div");
+    row.className = "px-row";
+    const dots = [];
+    for (let i = 0; i < count; i++) {
+      const d = document.createElement("div");
+      d.className = "px";
+      row.appendChild(d);
+      dots.push(d);
+    }
+    const name = document.createElement("span");
+    name.textContent = `${idx + 1}. ${label}`;
+    sec.appendChild(row);
+    sec.appendChild(name);
+    el.appendChild(sec);
+    sections.push(dots);
+  });
+  return sections;
+}
+const headerSections = buildHeader(document.getElementById("stripHeader"));
 const bulbAttract = document.getElementById("bulbAttract");
 const bulbGame = document.getElementById("bulbGame");
 const bulbRelay = document.getElementById("bulbRelay");
-const bulbSpare = document.getElementById("bulbSpare");
 
 const portEl = document.getElementById("port");
 const statusEl = document.getElementById("status");
@@ -278,11 +320,14 @@ const nextHint = document.getElementById("nextHint");
 const metaEl = document.getElementById("meta");
 const eventsEl = document.getElementById("events");
 const hitFailBtn = document.getElementById("hitFail");
-const spareBtn = document.getElementById("spareToggle");
+const headerTestBtn = document.getElementById("headerTestToggle");
+const previewBtn = document.getElementById("previewBtn");
+const attemptsBadge = document.getElementById("attemptsBadge");
 let lastEventCount = 0;
 let latestEvents = [];
 let latest = {};
 let connected = false;
+let previewMode = false;
 let statusAt = performance.now();
 let boardMsAtSample = 0;
 let animState = "—";
@@ -290,15 +335,71 @@ let phaseLocalStart = performance.now();
 let scriptToken = 0;
 let failHolding = false;
 let dipForced = { 1: null, 2: null, 3: null, 4: null }; // null=hardware, true/false=forced
+let previewFailUntil = 0;
+let previewWinUntil = 0;
+let previewMs0 = performance.now();
+
+function previewReset() {
+  previewMs0 = performance.now();
+  phaseLocalStart = performance.now();
+  animState = "ATTRACT";
+  latest = {
+    type: "status", ms: 0, state: "ATTRACT",
+    coin:0, start:0, fail:0, win:0,
+    coin_raw:0, start_raw:0, fail_raw:0, win_raw:0,
+    dip1:0, dip2:0, dip3:0, dip4:0, a6:900, a7:900,
+    coins:0, need:1, attempts: ATTEMPTS_PER_CREDIT,
+    attract:1, game:0, relay:0, fail_hold:0, hdr_test:0, hdr:0,
+  };
+  latestEvents = [];
+  lastEventCount = -1;
+  previewFailUntil = 0;
+  previewWinUntil = 0;
+  failHolding = false;
+}
+
+function digitMask(attempts) {
+  if (attempts >= 3) return 1 << HDR.D3;
+  if (attempts === 2) return 1 << HDR.D2;
+  if (attempts === 1) return 1 << HDR.D1;
+  return 0;
+}
+
+function statusMask(attempts) {
+  return (1 << HDR.LEFT) | (1 << HDR.ATTEMPTS) | digitMask(attempts);
+}
+
+/** Same section logic as firmware updateHeader() */
+function simHeaderMask(state, attempts, ms, phaseElapsed, hdrTest) {
+  if (hdrTest) return 0xFF;
+  const status = statusMask(attempts);
+  if (state === "ATTRACT") {
+    let m = status;
+    if (Math.floor(ms / 500) % 2 === 0) m |= 1 << HDR.TOKEN;
+    return m;
+  }
+  if (state === "WAIT_START") {
+    let m = status;
+    if (Math.floor(ms / 400) % 2 === 0) m |= 1 << HDR.START;
+    return m;
+  }
+  if (state === "PLAYING") return status | (1 << HDR.GO);
+  if (state === "WIN") {
+    const step = Math.floor(phaseElapsed / 150) % 10;
+    if (step < 8) return (1 << (step + 1)) - 1;
+    if (step === 8) return 0xFF;
+    return 0;
+  }
+  if (state === "FAIL") {
+    const flip = Math.floor(phaseElapsed / 120) % 2 === 0;
+    return flip ? status : 0;
+  }
+  return 0;
+}
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
   return r.json();
-}
-
-async function sendCmd(line) {
-  if (!connected) return { ok: false, error: "Not connected" };
-  return api("/api/cmd?line=" + encodeURIComponent(line), { method: "POST" });
 }
 
 async function refreshPorts() {
@@ -397,33 +498,157 @@ function simPixels(state, ms, phaseElapsed) {
 }
 
 function tickLeds() {
+  if (previewMode) tickPreview();
   const state = latest.state || "—";
-  const ms = boardMs();
+  const ms = previewMode ? (performance.now() - previewMs0) : boardMs();
+  const phaseElapsed = performance.now() - phaseLocalStart;
   setBulb(bulbAttract, !!latest.attract, "on-amber");
   setBulb(bulbGame, !!latest.game, "on-yellow");
   setBulb(bulbRelay, !!latest.relay, "on-red");
-  setBulb(bulbSpare, !!latest.spare, "on-orange");
-  const { front, back } = simPixels(state, ms, performance.now() - phaseLocalStart);
+  const { front, back } = simPixels(state, ms, phaseElapsed);
   paintStrip(frontDots, front);
   paintStrip(backDots, back);
+  const attempts = latest.attempts ?? ATTEMPTS_PER_CREDIT;
+  const hdrMask = (connected && latest.hdr != null)
+    ? (latest.hdr | 0)
+    : simHeaderMask(state, attempts, ms, phaseElapsed, !!latest.hdr_test);
+  if (previewMode) latest.hdr = hdrMask;
+  const hdrColor = state === "FAIL" ? [255, 0, 0] : [255, 140, 60];
+  headerSections.forEach((dots, s) => {
+    const on = (hdrMask >> s) & 1;
+    paintStrip(dots, dots.map(() => (on ? hdrColor : [0, 0, 0])));
+  });
   requestAnimationFrame(tickLeds);
 }
 
+function updateAttemptsBadge() {
+  const n = latest.attempts;
+  if (n == null) {
+    attemptsBadge.textContent = "Attempts left: —";
+    return;
+  }
+  attemptsBadge.textContent = `Attempts left: ${n}  ·  digit ${n >= 3 ? "3" : n === 2 ? "2" : n === 1 ? "1" : "off"}`;
+}
+
 function updateNextHint(state) {
-  if (!connected) {
-    nextHint.textContent = "Connect to see the next step";
+  if (!connected && !previewMode) {
+    nextHint.textContent = "Connect to the Nano, or click Preview (no board)";
     nextHint.className = "idle";
     return;
   }
   const coins = latest.coins ?? 0;
   const need = latest.need ?? 1;
+  const attempts = latest.attempts ?? ATTEMPTS_PER_CREDIT;
   if (state === "ATTRACT" && coins > 0 && coins < need) {
     nextHint.textContent = `Next: hit Coin again (${coins}/${need})`;
     nextHint.className = "";
     return;
   }
+  if (state === "PLAYING") {
+    nextHint.textContent = `Playing · ${attempts} attempt${attempts === 1 ? "" : "s"} left — Win or Fail`;
+    nextHint.className = "";
+    return;
+  }
+  if (state === "WAIT_START" && attempts < ATTEMPTS_PER_CREDIT) {
+    nextHint.textContent = `Return to start, then Start (${attempts} attempt${attempts === 1 ? "" : "s"} left)`;
+    nextHint.className = "";
+    return;
+  }
   nextHint.textContent = NEXT[state] || "Waiting for status…";
   nextHint.className = NEXT[state] ? "" : "idle";
+}
+
+function tickPreview() {
+  const now = performance.now();
+  latest.ms = Math.floor(now - previewMs0);
+  latest.fail = failHolding ? 1 : 0;
+  latest.fail_hold = failHolding ? 1 : 0;
+  latest.fail_raw = failHolding ? 1 : 0;
+  if (latest.state === "FAIL" && now >= previewFailUntil) {
+    if (latest.attempts > 0) {
+      setPreviewState("WAIT_START");
+      latest.game = 1; latest.attract = 0; latest.relay = 0;
+    } else {
+      setPreviewState("ATTRACT");
+      latest.attempts = ATTEMPTS_PER_CREDIT;
+      latest.coins = 0; latest.game = 0; latest.attract = 1; latest.relay = 0;
+    }
+  }
+  if (latest.state === "WIN" && now >= previewWinUntil) {
+    setPreviewState("ATTRACT");
+    latest.attempts = ATTEMPTS_PER_CREDIT;
+    latest.coins = 0; latest.game = 0; latest.attract = 1; latest.relay = 0;
+  }
+  if (latest.state === "ATTRACT") {
+    latest.attract = Math.floor(latest.ms / 500) % 2;
+    latest.game = 0;
+  }
+}
+
+function setPreviewState(st) {
+  latest.state = st;
+  animState = st;
+  phaseLocalStart = performance.now();
+  pushPreviewEvent("state", st);
+}
+
+function pushPreviewEvent(name, value) {
+  const stamp = new Date().toTimeString().slice(0, 8);
+  latestEvents.push(`${stamp}  ${name} = ${value}`);
+  if (latestEvents.length > 200) latestEvents = latestEvents.slice(-200);
+  lastEventCount = -1;
+}
+
+function previewHit(sw) {
+  if (!previewMode) return;
+  if (sw === "coin" && latest.state === "ATTRACT") {
+    latest.coins = (latest.coins || 0) + 1;
+    pushPreviewEvent("coin", latest.coins);
+    latest.relay = 1;
+    setTimeout(() => { if (previewMode) latest.relay = 0; }, 36);
+    if (latest.coins >= (latest.need || 1)) {
+      setPreviewState("WAIT_START");
+      latest.game = 1; latest.attract = 0;
+    }
+  } else if (sw === "start" && latest.state === "WAIT_START" && !failHolding) {
+    pushPreviewEvent("start", "1");
+    setPreviewState("PLAYING");
+    latest.game = 1; latest.attract = 0; latest.relay = 0;
+  } else if (sw === "fail" && latest.state === "PLAYING") {
+    pushPreviewEvent("fail", "1");
+    latest.attempts = Math.max(0, (latest.attempts || 0) - 1);
+    pushPreviewEvent("attempts", latest.attempts);
+    setPreviewState("FAIL");
+    latest.relay = 1;
+    previewFailUntil = performance.now() + 1500;
+    setTimeout(() => { if (previewMode) latest.relay = 0; }, 300);
+  } else if (sw === "win" && latest.state === "PLAYING") {
+    pushPreviewEvent("win", "1");
+    setPreviewState("WIN");
+    latest.relay = 1;
+    previewWinUntil = performance.now() + 5000;
+  }
+}
+
+function previewCmd(line) {
+  if (!previewMode) return;
+  if (line === "reset") {
+    previewReset();
+    pushPreviewEvent("sim", "reset");
+  } else if (line === "header test on") {
+    latest.hdr_test = 1;
+    pushPreviewEvent("sim", "header_test_on");
+  } else if (line === "header test off") {
+    latest.hdr_test = 0;
+    pushPreviewEvent("sim", "header_test_off");
+  } else if (line === "hold fail") {
+    failHolding = true;
+    if (latest.state === "PLAYING") previewHit("fail");
+  } else if (line === "release fail") {
+    failHolding = false;
+  } else if (line.startsWith("hit ")) {
+    previewHit(line.slice(4).trim());
+  }
 }
 
 function syncDipButtons() {
@@ -441,44 +666,59 @@ function syncDipButtons() {
       btn.textContent = `Force Dip${n}`;
     }
   }
-  spareBtn.classList.toggle("on", !!latest.spare);
-  spareBtn.textContent = latest.spare ? "Spare D7 ON" : "Spare D7";
+  headerTestBtn.classList.toggle("on", !!latest.hdr_test);
+  headerTestBtn.textContent = latest.hdr_test ? "Header test ON" : "Header test";
 }
 
 function setControlsEnabled(on) {
-  for (const id of ["hitCoin","hitStart","hitFail","hitWin","hitReset","runWin","runFail","forceDip1","forceDip2","forceDip3","forceDip4","dipsClear","spareToggle"]) {
+  for (const id of ["hitCoin","hitStart","hitFail","hitWin","hitReset","runWin","runFail","runThreeFail","forceDip1","forceDip2","forceDip3","forceDip4","dipsClear","headerTestToggle"]) {
     document.getElementById(id).disabled = !on;
   }
 }
 
 function render(data) {
   connected = !!data.connected;
+  if (connected && previewMode) {
+    previewMode = false;
+    previewBtn.classList.remove("on");
+    previewBtn.textContent = "Preview (no board)";
+  }
   const age = data.telemetry_age_ms;
   const stale = connected && (age == null || age > STALE_MS);
   statusEl.classList.toggle("stale", stale);
-  if (stale) {
+  if (previewMode) {
+    statusEl.textContent = "Preview mode · simulating header + 3 attempts (no board)";
+    statusEl.classList.remove("stale");
+    staleBanner.classList.remove("show");
+  } else if (stale) {
     statusEl.textContent = (data.status_text || "Connected") + ` · telemetry stale (${age ?? "—"} ms)`;
+    staleBanner.classList.add("show");
   } else {
     statusEl.textContent = data.status_text || "";
+    staleBanner.classList.remove("show");
   }
-  staleBanner.classList.toggle("show", stale);
   connectBtn.textContent = connected ? "Disconnect" : "Connect";
   connectBtn.classList.toggle("danger", connected);
-  setControlsEnabled(connected);
+  setControlsEnabled(connected || previewMode);
 
-  const s = data.status || {};
-  if (s.state && s.state !== animState) {
-    animState = s.state;
-    phaseLocalStart = performance.now();
+  if (!previewMode) {
+    const s = data.status || {};
+    if (s.state && s.state !== animState) {
+      animState = s.state;
+      phaseLocalStart = performance.now();
+    }
+    if (s.ms != null) {
+      boardMsAtSample = s.ms;
+      statusAt = performance.now();
+    }
+    latest = s;
   }
-  if (s.ms != null) {
-    boardMsAtSample = s.ms;
-    statusAt = performance.now();
-  }
-  latest = s;
-  stateEl.textContent = s.state || "—";
-  stateEl.className = s.state || "";
-  updateNextHint(s.state);
+  stateEl.textContent = latest.state || "—";
+  stateEl.className = latest.state || "";
+  updateAttemptsBadge();
+  updateNextHint(latest.state);
+
+  const s = latest;
 
   // Use debounced board flags for Dip1/2 (raw alone flickers from ADC crosstalk).
   const a6 = s.a6, a7 = s.a7;
@@ -502,12 +742,13 @@ function render(data) {
   }
   metaEl.textContent =
     `coins ${s.coins ?? 0} / need ${s.need ?? 1}\n` +
-    `attempts ${s.attempts ?? 1}\n` +
+    `attempts ${s.attempts ?? ATTEMPTS_PER_CREDIT}\n` +
+    `hdr mask ${s.hdr ?? "—"}\n` +
     `A6=${a6 ?? "—"}  A7=${a7 ?? "—"}` + dipHint;
   syncDipButtons();
   hitFailBtn.classList.toggle("holding", failHolding || !!s.fail_hold);
 
-  latestEvents = data.events || [];
+  if (!previewMode) latestEvents = data.events || [];
   if (latestEvents.length !== lastEventCount) {
     eventsEl.innerHTML = "";
     for (const line of latestEvents.slice(-200)) {
@@ -520,19 +761,30 @@ function render(data) {
   }
 }
 
+function live() { return connected || previewMode; }
+
+async function sendCmd(line) {
+  if (previewMode) {
+    previewCmd(line);
+    return { ok: true };
+  }
+  if (!connected) return { ok: false, error: "Not connected" };
+  return api("/api/cmd?line=" + encodeURIComponent(line), { method: "POST" });
+}
+
 async function sendHit(sw) {
-  if (!connected) return;
+  if (!live()) return;
   await sendCmd("hit " + sw);
 }
 
 async function sendReset() {
-  if (!connected) return;
+  if (!live()) return;
   failHolding = false;
   await sendCmd("reset");
 }
 
 async function holdFail() {
-  if (!connected || failHolding) return;
+  if (!live() || failHolding) return;
   failHolding = true;
   hitFailBtn.classList.add("holding");
   await sendCmd("hold fail");
@@ -542,14 +794,14 @@ async function releaseFail() {
   if (!failHolding && !latest.fail_hold) return;
   failHolding = false;
   hitFailBtn.classList.remove("holding");
-  if (connected) await sendCmd("release fail");
+  if (live()) await sendCmd("release fail");
 }
 
 function sleep(ms, token) {
   return new Promise((resolve) => {
     const t = setTimeout(() => resolve(true), ms);
     const iv = setInterval(() => {
-      if (token !== scriptToken || !connected) {
+      if (token !== scriptToken || !live()) {
         clearTimeout(t);
         clearInterval(iv);
         resolve(false);
@@ -560,7 +812,7 @@ function sleep(ms, token) {
 
 async function waitForState(wanted, token, timeoutMs) {
   const start = performance.now();
-  while (token === scriptToken && connected) {
+  while (token === scriptToken && live()) {
     if (latest.state === wanted) return true;
     if (performance.now() - start > timeoutMs) return false;
     await sleep(80, token);
@@ -569,7 +821,7 @@ async function waitForState(wanted, token, timeoutMs) {
 }
 
 async function runScript(kind) {
-  if (!connected) return;
+  if (!live()) return;
   const token = ++scriptToken;
   await releaseFail();
   await sendCmd("reset");
@@ -580,20 +832,35 @@ async function runScript(kind) {
     if (!(await sleep(250, token))) return;
   }
   if (!(await waitForState("WAIT_START", token, 3000))) return;
-  await sendHit("start");
-  if (!(await waitForState("PLAYING", token, 3000))) return;
-  if (!(await sleep(400, token))) return;
+
+  const failCount = kind === "threeFail" ? 3 : kind === "fail" ? 1 : 0;
   if (kind === "win") {
+    await sendHit("start");
+    if (!(await waitForState("PLAYING", token, 3000))) return;
+    if (!(await sleep(400, token))) return;
     await sendHit("win");
-  } else {
+    return;
+  }
+
+  for (let f = 0; f < failCount; f++) {
+    await sendHit("start");
+    if (!(await waitForState("PLAYING", token, 3000))) return;
+    if (!(await sleep(300, token))) return;
     await holdFail();
     await sleep(200, token);
     await releaseFail();
+    if (f < failCount - 1) {
+      if (!(await waitForState("WAIT_START", token, 4000))) return;
+      if (!(await sleep(200, token))) return;
+    } else {
+      await waitForState("ATTRACT", token, 4000);
+    }
   }
 }
 
 async function toggleDip(n) {
-  if (!connected) return;
+  if (!live()) return;
+  if (previewMode) return;  // DIP force is board-only
   const cur = dipForced[n];
   const live = !!latest["dip" + n];
   // cycle: hardware → force ON → force OFF → hardware
@@ -613,20 +880,40 @@ async function toggleDip(n) {
 
 document.getElementById("refresh").onclick = () => refreshPorts();
 connectBtn.onclick = () => toggleConnect();
+previewBtn.onclick = () => {
+  if (connected) return;
+  previewMode = !previewMode;
+  previewBtn.classList.toggle("on", previewMode);
+  previewBtn.textContent = previewMode ? "Exit preview" : "Preview (no board)";
+  if (previewMode) {
+    previewReset();
+    pushPreviewEvent("sim", "preview_on");
+    setControlsEnabled(true);
+  } else {
+    latest = {};
+    setControlsEnabled(false);
+    stateEl.textContent = "—";
+    attemptsBadge.textContent = "Attempts left: —";
+    nextHint.textContent = "Connect to the Nano, or click Preview (no board)";
+    nextHint.className = "idle";
+  }
+};
 document.getElementById("hitCoin").onclick = () => sendHit("coin");
 document.getElementById("hitStart").onclick = () => sendHit("start");
 document.getElementById("hitWin").onclick = () => sendHit("win");
 document.getElementById("hitReset").onclick = () => sendReset();
 document.getElementById("runWin").onclick = () => runScript("win");
 document.getElementById("runFail").onclick = () => runScript("fail");
+document.getElementById("runThreeFail").onclick = () => runScript("threeFail");
 document.getElementById("runStop").onclick = () => { scriptToken++; releaseFail(); };
 document.getElementById("dipsClear").onclick = async () => {
   dipForced = { 1: null, 2: null, 3: null, 4: null };
   await sendCmd("dips clear");
   syncDipButtons();
 };
-spareBtn.onclick = async () => {
-  await sendCmd(latest.spare ? "spare off" : "spare on");
+headerTestBtn.onclick = async () => {
+  if (!live()) return;
+  await sendCmd(latest.hdr_test ? "header test off" : "header test on");
 };
 for (let n = 1; n <= 4; n++) {
   document.getElementById("forceDip" + n).onclick = () => toggleDip(n);
@@ -678,7 +965,15 @@ setControlsEnabled(false);
 refreshPorts();
 requestAnimationFrame(tickLeds);
 setInterval(async () => {
-  try { render(await api("/api/status")); } catch (e) { statusEl.textContent = "Server unreachable"; statusEl.classList.add("stale"); }
+  try {
+    if (previewMode) {
+      render({ connected: false, status_text: "Preview", status: latest, events: latestEvents, telemetry_age_ms: 0 });
+    } else {
+      render(await api("/api/status"));
+    }
+  } catch (e) {
+    if (!previewMode) { statusEl.textContent = "Server unreachable"; statusEl.classList.add("stale"); }
+  }
 }, 100);
 </script>
 </body>
@@ -710,9 +1005,11 @@ class MonitorState:
         if not ports:
             return ""
 
-        def usable(device: str) -> bool:
-            bad = ("debug-console", "Bluetooth", "incoming", "wlan", "tty.Bluetooth")
-            return not any(b.lower() in device.lower() for b in bad)
+        def is_nano(device: str) -> bool:
+            d = device.lower()
+            if any(b in d for b in ("debug-console", "bluetooth", "incoming", "wlan")):
+                return False
+            return ("usbserial" in d) or ("usbmodem" in d) or ("wchusbserial" in d)
 
         if self.preferred_port:
             for p in ports:
@@ -720,12 +1017,9 @@ class MonitorState:
                     return p["device"]
             return self.preferred_port
         for p in ports:
-            if ("usbserial" in p["device"] or "usbmodem" in p["device"]) and usable(p["device"]):
+            if is_nano(p["device"]):
                 return p["device"]
-        for p in ports:
-            if usable(p["device"]):
-                return p["device"]
-        return ports[0]["device"]
+        return ""  # no board — use Preview mode
 
     def log(self, text: str) -> None:
         stamp = time.strftime("%H:%M:%S")
@@ -940,8 +1234,11 @@ def main() -> None:
     print(f"Booze Barometer monitor: {url}")
     print("Leave this terminal open. Press Ctrl+C to quit.")
 
-    if STATE.selected_port:
+    # Only auto-connect when a real USB Nano port is present
+    if STATE.selected_port and ("usbserial" in STATE.selected_port or "usbmodem" in STATE.selected_port or "wchusbserial" in STATE.selected_port):
         threading.Thread(target=lambda: STATE.connect(STATE.selected_port), daemon=True).start()
+    else:
+        STATE.status_text = "No Nano found — click Preview (no board) or plug in USB"
 
     if not args.no_browser:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
