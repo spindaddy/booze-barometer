@@ -61,7 +61,7 @@ Optional **DIP switches** can set things like how many coin pulses are needed, o
 | Win | Sections fill 1→8, flash all, repeat |
 | Fail | Left + Attempts + digit flash red; digit steps **3→2→1**; after 3rd fail → attract |
 
-Each credit gets **3 attempts**. After a fail the digit drops (3→2→1). After the third fail the game ends and returns to attract. After fail 1 or 2 it returns to wait-for-start: the player must get off the wire (Fail clear) and press **Start** before the next attempt.
+Each credit gets **3 attempts**. After a fail the digit drops (3→2→1). After the third fail the game ends and returns to attract. After fail 1 or 2 it returns to wait-for-start — the player must press **Start** again (Start works even if Fail is still held). Fail only arms after the wire has been clear once, so a held Fail cannot block Start or instant-fail the next try.
 
 At power-up the header lights each section one at a time so you can check the section boundaries. Section lengths live in `HDR_LEN` in the sketch.
 

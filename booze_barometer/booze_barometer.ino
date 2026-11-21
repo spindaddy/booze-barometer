@@ -166,7 +166,7 @@ bool simStart = false;
 bool simFail  = false;
 bool simWin   = false;
 bool simFailHold = false;  // level hold from "hold fail"
-bool failArmed = false;    // false from coin-up until Start (+ brief grace)
+bool failArmed = false;    // false until Fail has been clear once after Start
 unsigned long failArmAt = 0;
 
 bool dip1On = false;
@@ -703,9 +703,11 @@ void enterWaitStart() {
 void enterPlaying() {
   state = PLAYING;
   relay(false);
-  // Arm Fail shortly after Start so a held fail wire cannot instant-fail
+  // Accept Start even if Fail is still held. Do not arm Fail until the wire
+  // has been clear once — then a short settle — so Start always works and
+  // a held Fail after a miss cannot eat the Start or instant-fail the next try.
   failArmed = false;
-  failArmAt = millis() + 300;
+  failArmAt = 0;
   clearFailEdge();
   btnWin.stable = HIGH;
   btnWin.lastRaw = digitalRead(PIN_WIN);
@@ -937,8 +939,8 @@ void loop() {
     case WAIT_START:
       animWaitStart();
       serviceCoinDing();  // finish ding after last coin → WAIT_START
-      // Start only after Fail is clear — player must leave the wire / return to start
-      if (startJust && !failDown) {
+      // Always require a Start press (even if Fail is still held after a miss)
+      if (startJust) {
         emitEvent("start", "1");
         enterPlaying();
       }
@@ -946,10 +948,18 @@ void loop() {
 
     case PLAYING:
       animPlaying();
-      if (!failArmed && failArmAt != 0 && (long)(millis() - failArmAt) >= 0) {
-        failArmed = true;
-        failArmAt = 0;
-        clearFailEdge();  // drop any Fail held through Start
+      // Arm Fail only after the wire has been clear once since Start
+      if (!failArmed) {
+        if (!failDown) {
+          if (failArmAt == 0) failArmAt = millis() + 50;  // brief settle after release
+          else if ((long)(millis() - failArmAt) >= 0) {
+            failArmed = true;
+            failArmAt = 0;
+            clearFailEdge();
+          }
+        } else {
+          failArmAt = 0;  // still held — keep waiting for a clear
+        }
       }
       if (failArmed && failDown) {
         emitEvent("fail", "1");

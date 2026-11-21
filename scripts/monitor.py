@@ -153,6 +153,7 @@ HTML = r"""<!DOCTYPE html>
       <button id="runWin" type="button">Full win run</button>
       <button id="runFail" class="failrun" type="button">1 fail → back to Start</button>
       <button id="runThreeFail" class="failrun" type="button">3 fails → game over</button>
+      <button id="runHeldFail" class="failrun" type="button">Fail held → Start still works</button>
       <button id="runStop" class="secondary" type="button">Stop script</button>
     </div>
   </div>
@@ -246,7 +247,7 @@ const HDR = { TOKEN:0, START:1, GO:2, LEFT:3, ATTEMPTS:4, D1:5, D2:6, D3:7 };
 const ATTEMPTS_PER_CREDIT = 3;
 const NEXT = {
   ATTRACT: "Next: hit Coin → WAIT_START (header: Insert Token blink + Left/Attempts/3)",
-  WAIT_START: "Next: clear Fail if held, then hit Start (must return to start each attempt)",
+  WAIT_START: "Next: hit Start (works even if Fail still held; Fail arms after wire clears)",
   PLAYING: "Next: Win, or Fail (digit drops 3→2→1; after 3rd fail → game over)",
   WIN: "Waiting — win lightshow, then back to ATTRACT",
   FAIL: "Fail anim — if attempts left → WAIT_START; else ATTRACT",
@@ -338,6 +339,8 @@ let dipForced = { 1: null, 2: null, 3: null, 4: null }; // null=hardware, true/f
 let previewFailUntil = 0;
 let previewWinUntil = 0;
 let previewMs0 = performance.now();
+let previewFailArmed = false;
+let previewFailArmAt = 0;
 
 function previewReset() {
   previewMs0 = performance.now();
@@ -356,6 +359,8 @@ function previewReset() {
   previewFailUntil = 0;
   previewWinUntil = 0;
   failHolding = false;
+  previewFailArmed = false;
+  previewFailArmAt = 0;
 }
 
 function digitMask(attempts) {
@@ -564,20 +569,38 @@ function tickPreview() {
   latest.fail = failHolding ? 1 : 0;
   latest.fail_hold = failHolding ? 1 : 0;
   latest.fail_raw = failHolding ? 1 : 0;
+  // Match firmware: Fail arms only after wire has been clear once since Start
+  if (latest.state === "PLAYING" && !previewFailArmed) {
+    if (!failHolding) {
+      if (!previewFailArmAt) previewFailArmAt = now + 50;
+      else if (now >= previewFailArmAt) {
+        previewFailArmed = true;
+        previewFailArmAt = 0;
+        pushPreviewEvent("sim", "fail_armed");
+      }
+    } else {
+      previewFailArmAt = 0;
+    }
+  }
   if (latest.state === "FAIL" && now >= previewFailUntil) {
     if (latest.attempts > 0) {
       setPreviewState("WAIT_START");
       latest.game = 1; latest.attract = 0; latest.relay = 0;
+      previewFailArmed = false;
+      previewFailArmAt = 0;
     } else {
       setPreviewState("ATTRACT");
       latest.attempts = ATTEMPTS_PER_CREDIT;
       latest.coins = 0; latest.game = 0; latest.attract = 1; latest.relay = 0;
+      previewFailArmed = false;
+      previewFailArmAt = 0;
     }
   }
   if (latest.state === "WIN" && now >= previewWinUntil) {
     setPreviewState("ATTRACT");
     latest.attempts = ATTEMPTS_PER_CREDIT;
     latest.coins = 0; latest.game = 0; latest.attract = 1; latest.relay = 0;
+    previewFailArmed = false;
   }
   if (latest.state === "ATTRACT") {
     latest.attract = Math.floor(latest.ms / 500) % 2;
@@ -610,17 +633,26 @@ function previewHit(sw) {
       setPreviewState("WAIT_START");
       latest.game = 1; latest.attract = 0;
     }
-  } else if (sw === "start" && latest.state === "WAIT_START" && !failHolding) {
+  } else if (sw === "start" && latest.state === "WAIT_START") {
+    // Start always works, even if Fail is still held
     pushPreviewEvent("start", "1");
     setPreviewState("PLAYING");
     latest.game = 1; latest.attract = 0; latest.relay = 0;
+    previewFailArmed = false;
+    previewFailArmAt = 0;
   } else if (sw === "fail" && latest.state === "PLAYING") {
+    if (!previewFailArmed) {
+      pushPreviewEvent("sim", "fail_ignored_not_armed");
+      return;
+    }
     pushPreviewEvent("fail", "1");
     latest.attempts = Math.max(0, (latest.attempts || 0) - 1);
     pushPreviewEvent("attempts", latest.attempts);
     setPreviewState("FAIL");
     latest.relay = 1;
     previewFailUntil = performance.now() + 1500;
+    previewFailArmed = false;
+    previewFailArmAt = 0;
     setTimeout(() => { if (previewMode) latest.relay = 0; }, 300);
   } else if (sw === "win" && latest.state === "PLAYING") {
     pushPreviewEvent("win", "1");
@@ -643,7 +675,7 @@ function previewCmd(line) {
     pushPreviewEvent("sim", "header_test_off");
   } else if (line === "hold fail") {
     failHolding = true;
-    if (latest.state === "PLAYING") previewHit("fail");
+    if (latest.state === "PLAYING" && previewFailArmed) previewHit("fail");
   } else if (line === "release fail") {
     failHolding = false;
   } else if (line.startsWith("hit ")) {
@@ -671,7 +703,7 @@ function syncDipButtons() {
 }
 
 function setControlsEnabled(on) {
-  for (const id of ["hitCoin","hitStart","hitFail","hitWin","hitReset","runWin","runFail","runThreeFail","forceDip1","forceDip2","forceDip3","forceDip4","dipsClear","headerTestToggle"]) {
+  for (const id of ["hitCoin","hitStart","hitFail","hitWin","hitReset","runWin","runFail","runThreeFail","runHeldFail","forceDip1","forceDip2","forceDip3","forceDip4","dipsClear","headerTestToggle"]) {
     document.getElementById(id).disabled = !on;
   }
 }
@@ -845,7 +877,9 @@ async function runScript(kind) {
   for (let f = 0; f < failCount; f++) {
     await sendHit("start");
     if (!(await waitForState("PLAYING", token, 3000))) return;
-    if (!(await sleep(300, token))) return;
+    // Fail arms only after wire is clear — ensure clear, brief settle, then Fail
+    await releaseFail();
+    if (!(await sleep(120, token))) return;
     await holdFail();
     await sleep(200, token);
     await releaseFail();
@@ -856,6 +890,37 @@ async function runScript(kind) {
       await waitForState("ATTRACT", token, 4000);
     }
   }
+}
+
+async function runHeldFailScript() {
+  // Repro: Fail still held after miss → Start must still work; Fail arms after clear
+  if (!live()) return;
+  const token = ++scriptToken;
+  await releaseFail();
+  await sendCmd("reset");
+  if (!(await sleep(300, token))) return;
+  await sendHit("coin");
+  if (!(await waitForState("WAIT_START", token, 3000))) return;
+  await sendHit("start");
+  if (!(await waitForState("PLAYING", token, 3000))) return;
+  await releaseFail();
+  if (!(await sleep(120, token))) return;
+  await holdFail();  // first fail
+  if (!(await waitForState("FAIL", token, 2000))) return;
+  // Keep Fail held through fail anim into WAIT_START
+  if (!(await waitForState("WAIT_START", token, 4000))) return;
+  pushPreviewEvent("sim", "fail_still_held_press_start");
+  await sendHit("start");  // must work while Fail held
+  if (!(await waitForState("PLAYING", token, 3000))) return;
+  pushPreviewEvent("sim", "playing_with_fail_held_ok");
+  // Still held — Fail not armed yet; release then re-touch
+  if (!(await sleep(200, token))) return;
+  await releaseFail();
+  if (!(await sleep(150, token))) return;
+  await holdFail();
+  await sleep(200, token);
+  await releaseFail();
+  await waitForState("WAIT_START", token, 4000);
 }
 
 async function toggleDip(n) {
@@ -905,6 +970,7 @@ document.getElementById("hitReset").onclick = () => sendReset();
 document.getElementById("runWin").onclick = () => runScript("win");
 document.getElementById("runFail").onclick = () => runScript("fail");
 document.getElementById("runThreeFail").onclick = () => runScript("threeFail");
+document.getElementById("runHeldFail").onclick = () => runHeldFailScript();
 document.getElementById("runStop").onclick = () => { scriptToken++; releaseFail(); };
 document.getElementById("dipsClear").onclick = async () => {
   dipForced = { 1: null, 2: null, 3: null, 4: null };
